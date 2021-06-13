@@ -33,7 +33,7 @@ parser.add_argument("--extra-manufacturer-clocks", type=float_list, default=[0.2
     help="extra clock choices for manufacturers, specified as decimals")
 parser.add_argument("--show-unused", action="store_true",
     help="show unused LP columns (coeff 0) in the optimization result")
-parser.add_argument("--xlsx-report", type=str, default="Report.xlsx",
+parser.add_argument("--xlsx-report", type=str, default="reports/Report.xlsx",
     help="path to xlsx report output")
 parser.add_argument("--xlsx-sheet-suffix", type=str, default="",
     help="suffix to add to xlsx sheet names")
@@ -975,10 +975,6 @@ for column_id, column, column_coeff in column_results:
 
     print(f"{column_desc} = {column_coeff}")
 
-    # don't show purely offsetting LP columns in the breakdown (e.g. "objective|points" as consumer of points)
-    if column.display_info["type"] in ["objective", "power", "extra_cost"]:
-        continue
-
     for variable, coeff in column.items():
         rate = column_coeff * coeff
         source = {
@@ -1003,10 +999,10 @@ variable_order = to_index_map(
 def get_variable_display_info(variable):
     tokens = variable.split("|")
     type_ = tokens[0]
-    if type_ == "resource" or type_ == "item":
+    if type_ == "item" or type_ == "resource":
         item_class = tokens[1]
         tokens[1] = get_item_display_name(item_class)
-    return (variable_order[type_], "|".join(tokens))
+    return (type_, "|".join(tokens))
 
 def finalize_variable_budget_side(budget_side):
     if not budget_side:
@@ -1020,8 +1016,14 @@ def finalize_variable_budget_side(budget_side):
     budget_side.insert(0, {"desc": "Total", "count": "n/a", "rate": total_rate, "share": 1.0})
 
 for variable, breakdown in variable_breakdowns.items():
-    type_order, name = get_variable_display_info(variable)
-    breakdown["type_order"] = type_order
+    type_, name = get_variable_display_info(variable)
+
+    # don't show offsetting dummy items in the breakdown (e.g. "objective|points" as consumer of points)
+    # currently these are precisely the consumption of special variables, but that may change
+    if type_ not in ["item", "resource"]:
+        breakdown["consumption"] = []
+
+    breakdown["type_order"] = variable_order[type_]
     breakdown["name"] = name
     if variable in indices_lb:
         slack = lp_result.slack[indices_lb[variable]]
