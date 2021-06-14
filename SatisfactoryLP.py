@@ -31,6 +31,8 @@ parser.add_argument("--extra-miner-clocks", type=float_list, default=[],
     help="extra clock choices for miners, specified as decimals")
 parser.add_argument("--extra-manufacturer-clocks", type=float_list, default=[0.25, 0.5, 0.75],
     help="extra clock choices for manufacturers, specified as decimals")
+parser.add_argument("--allow-waste", action="store_true",
+    help="allow accumulation of nuclear waste and other unsinkable items")
 parser.add_argument("--show-unused", action="store_true",
     help="show unused LP columns (coeff 0) in the optimization result")
 parser.add_argument("--xlsx-report", type=str, default="reports/Report.xlsx",
@@ -618,14 +620,18 @@ for recipe_class, recipe in recipes.items():
         )
 
 for item_class, item in items.items():
-    if item["form"] != "RF_SOLID":
-        continue
-
     points = item["points"]
-    if points == 0:
-        continue
-
     item_var = f"item|{item_class}"
+
+    if not (item["form"] == "RF_SOLID" and points > 0):
+        if args.allow_waste:
+            add_lp_column(
+                {item_var: -1},
+                type_="waste",
+                name=item_class,
+                display_name=item["display_name"],
+            )
+        continue
 
     column = {
         item_var: -1,
@@ -869,7 +875,7 @@ def from_index_map(d):
     return result
 
 # order is for report display, but we might as well sort it here
-column_type_order = to_index_map(["objective", "power", "extra_cost", "sink", "manufacturer", "miner", "generator"])
+column_type_order = to_index_map(["objective", "power", "extra_cost", "sink", "waste", "manufacturer", "miner", "generator"])
 column_subtype_order = to_index_map(["impure", "normal", "pure"])
 objective_order = to_index_map(["points", "machines", "conveyors", "pipelines", "power_shards"])
 extra_cost_order = to_index_map(["transport_power_cost", "drone_battery_cost"])
