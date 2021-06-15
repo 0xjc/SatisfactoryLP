@@ -19,7 +19,7 @@ parser.add_argument("--transport-power-cost", type=float, default=50.0,
     help="added power cost for transport per conveyor/pipeline of mined resource")
 parser.add_argument("--drone-battery-cost", type=float, default=0.5,
     help="added battery cost for drone transport per conveyor/pipeline of mined resource")
-parser.add_argument("--machine-penalty", type=float, default=1000.0,
+parser.add_argument("--machine-penalty", type=float, default=2000.0,
     help="objective penalty per machine built")
 parser.add_argument("--conveyor-penalty", type=float, default=0.0,
     help="objective penalty per conveyor belt needed")
@@ -35,7 +35,7 @@ parser.add_argument("--allow-waste", action="store_true",
     help="allow accumulation of nuclear waste and other unsinkable items")
 parser.add_argument("--show-unused", action="store_true",
     help="show unused LP columns (coeff 0) in the optimization result")
-parser.add_argument("--xlsx-report", type=str, default="reports/Report.xlsx",
+parser.add_argument("--xlsx-report", type=str, default="Report.xlsx",
     help="path to xlsx report output")
 parser.add_argument("--xlsx-sheet-suffix", type=str, default="",
     help="suffix to add to xlsx sheet names")

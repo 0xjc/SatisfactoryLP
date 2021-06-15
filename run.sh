@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+mkdir -p reports
+
 python SatisfactoryLP.py --transport-power-cost=0 --drone-battery-cost=0 --machine-penalty=0 --xlsx-report="reports/Report-MP0.xlsx" --xlsx-sheet-suffix=" (MP0)"
 
 for MP in 1000 2000 4000 8000; do
