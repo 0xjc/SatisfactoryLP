@@ -518,7 +518,7 @@ def get_item_display_name(item_class):
     else:
         return ADDITIONAL_DISPLAY_NAMES[item_class]
 
-def add_lp_column(column, type_, name, display_name=None, subtype=None, clock=None):
+def add_lp_column(column, type_, name, display_name=None, machine_name=None, subtype=None, clock=None):
     tokens = [type_, name]
     if subtype is not None:
         tokens.append(subtype)
@@ -526,7 +526,13 @@ def add_lp_column(column, type_, name, display_name=None, subtype=None, clock=No
         clock_percent = 100.0 * clock
         tokens.append(f"{clock_percent}")
     column_id = "|".join(tokens)
-    display_info = {"type": type_, "display_name": display_name, "subtype": subtype, "clock": clock}
+    display_info = {
+        "type": type_,
+        "display_name": display_name or name,
+        "machine_name": machine_name,
+        "subtype": subtype,
+        "clock": clock,
+    }
     lp_columns[column_id] = LPColumn(column, display_info=display_info)
 
 for resource_id, resource in resources.items():
@@ -568,6 +574,7 @@ for resource_id, resource in resources.items():
             type_="miner",
             name=resource_id,
             display_name=item["display_name"],
+            machine_name=miner["display_name"],
             subtype=resource["subtype"],
             clock=clock,
         )
@@ -616,6 +623,7 @@ for recipe_class, recipe in recipes.items():
             type_="manufacturer",
             name=recipe_class,
             display_name=recipe["display_name"],
+            machine_name=manufacturer["display_name"],
             clock=clock,
         )
 
@@ -680,6 +688,7 @@ for generator_class, generator in generators.items():
             type_="generator",
             name=fuel_class,
             display_name=fuel["display_name"],
+            machine_name=generator["display_name"],
             clock=1,
         )
 
@@ -697,6 +706,7 @@ for resource_id, resource in geysers.items():
         type_="generator",
         name=resource_id,
         display_name=get_item_display_name(GEYSER_CLASS),
+        machine_name=geothermal_generator["display_name"],
         subtype=resource["subtype"],
     )
 
@@ -740,7 +750,6 @@ for objective in ["points", "machines", "conveyors", "pipelines"]:
         column,
         type_="objective",
         name=objective,
-        display_name=objective,
     )
     lp_equalities[objective] = 0.0
 
@@ -756,7 +765,6 @@ for extra_cost, cost_variable, cost_coeff in [
         column,
         type_="extra_cost",
         name=extra_cost,
-        display_name=extra_cost,
     )
     lp_equalities[extra_cost] = 0.0
 
@@ -768,7 +776,6 @@ add_lp_column(
     column,
     type_="power",
     name="usage",
-    display_name="usage",
 )
 lp_equalities["power_consumption"] = 0.0
 lp_lower_bounds["power_production"] = 0.0
@@ -781,7 +788,6 @@ add_lp_column(
     column,
     type_="objective",
     name="power_shards",
-    display_name="power_shards",
 )
 lp_equalities["power_shard_usage"] = 0.0
 lp_lower_bounds["power_shards"] = -TOTAL_POWER_SHARDS
@@ -956,11 +962,17 @@ pprint(lp_result)
 
 ### Display formatting ###
 
+def format_subtype(subtype):
+    if subtype is None or subtype == "extractor":
+        return None
+    return re.sub(r"^BP_FrackingCore_?", "#", subtype).capitalize()
+
 def get_column_desc(column):
     info = column.display_info
-    tokens = [info["type"], info["display_name"]]
-    if info["subtype"] is not None:
-        tokens.append(info["subtype"])
+    tokens = [info["machine_name"] or info["type"], info["display_name"]]
+    subtype = format_subtype(info["subtype"])
+    if subtype is not None:
+        tokens.append(subtype)
     if info["clock"] is not None:
         clock_percent = 100.0 * info["clock"]
         tokens.append(f"{clock_percent}%")
@@ -1068,9 +1080,9 @@ if args.xlsx_report:
     def write_cell(sheet, *args, fmt=default_format):
         sheet.write(*args, fmt)
 
-    sheet1.add_table(0, 0, len(column_results), 4, {
+    sheet1.add_table(0, 0, len(column_results), 5, {
         "columns": [{"header": header, "header_format": bold_format}
-        for header in ["Type", "Name", "Subtype", "Clock", "Quantity"]],
+        for header in ["Type", "Name", "Machine", "Subtype", "Clock", "Quantity"]],
         "style": "Table Style Light 16",
     })
 
@@ -1078,11 +1090,12 @@ if args.xlsx_report:
         info = column.display_info
         write_cell(sheet1, i + 1, 0, info["type"])
         write_cell(sheet1, i + 1, 1, info["display_name"])
-        write_cell(sheet1, i + 1, 2, info["subtype"] or "n/a")
-        write_cell(sheet1, i + 1, 3, info["clock"] or "n/a", fmt=percent_format)
-        write_cell(sheet1, i + 1, 4, column_coeff)
+        write_cell(sheet1, i + 1, 2, info["machine_name"] or "n/a")
+        write_cell(sheet1, i + 1, 3, info["subtype"] or "n/a")
+        write_cell(sheet1, i + 1, 4, info["clock"] or "n/a", fmt=percent_format)
+        write_cell(sheet1, i + 1, 5, column_coeff)
 
-    for c, width in enumerate([14, 41, 19, 11, 13]):
+    for c, width in enumerate([14, 39, 25, 19, 11, 13]):
         sheet1.set_column(c, c, width)
 
     current_row = 0
@@ -1141,7 +1154,7 @@ if args.xlsx_report:
                 write_cell(sheet2, current_row, 2, breakdown[key], fmt=fmts[1])
                 current_row += 1
 
-    for c, width in enumerate([46, 19, 14] + [57] * (max_budget_entries - 1)):
+    for c, width in enumerate([41, 19, 13] + [59] * (max_budget_entries - 1)):
         sheet2.set_column(c, c, width)
 
     workbook.close()
