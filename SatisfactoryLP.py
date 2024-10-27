@@ -1,49 +1,124 @@
 #!/usr/bin/env python
-# coding: utf-8
+# pyright: basic
 
+from dataclasses import dataclass
+from fractions import Fraction
 import scipy.optimize
 import json
 import numpy as np
 import re
 import sys
-import math
 import argparse
 from collections import defaultdict
 from pprint import pprint
+from typing import Any, Iterable, TypeVar, cast
 
-def float_list(s):
-    return [float(x) for x in s.split(",")] if s else []
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--transport-power-cost", type=float, default=50.0,
-    help="added power cost for transport per conveyor/pipeline of mined resource")
-parser.add_argument("--drone-battery-cost", type=float, default=0.5,
-    help="added battery cost for drone transport per conveyor/pipeline of mined resource")
-parser.add_argument("--machine-penalty", type=float, default=2000.0,
-    help="objective penalty per machine built")
-parser.add_argument("--conveyor-penalty", type=float, default=0.0,
-    help="objective penalty per conveyor belt needed")
-parser.add_argument("--pipeline-penalty", type=float, default=0.0,
-    help="objective penalty per pipeline needed")
-parser.add_argument("--power-shard-penalty-ratio", type=float, default=0.6,
-    help="objective penalty per power shard used, specified as ratio of machine penalty")
-parser.add_argument("--extra-miner-clocks", type=float_list, default=[],
-    help="extra clock choices for miners, specified as decimals")
-parser.add_argument("--extra-manufacturer-clocks", type=float_list, default=[0.25, 0.5, 0.75],
-    help="extra clock choices for manufacturers, specified as decimals")
-parser.add_argument("--allow-waste", action="store_true",
-    help="allow accumulation of nuclear waste and other unsinkable items")
-parser.add_argument("--show-unused", action="store_true",
-    help="show unused LP columns (coeff 0) in the optimization result")
-parser.add_argument("--xlsx-report", type=str, default="Report.xlsx",
-    help="path to xlsx report output")
-parser.add_argument("--xlsx-sheet-suffix", type=str, default="",
-    help="suffix to add to xlsx sheet names")
+T = TypeVar("T")
+
+
+parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument(
+    "--machine-penalty",
+    type=float,
+    default=1000.0,
+    help="objective penalty per machine built",
+)
+parser.add_argument(
+    "--conveyor-penalty",
+    type=float,
+    default=0.0,
+    help="objective penalty per conveyor belt of machine input/output",
+)
+parser.add_argument(
+    "--pipeline-penalty",
+    type=float,
+    default=0.0,
+    help="objective penalty per pipeline of machine input/output",
+)
+parser.add_argument(
+    "--transport-power-cost",
+    type=float,
+    default=0.0,
+    help="added power cost to simulate transport per conveyor/pipeline of mined resource",
+)
+parser.add_argument(
+    "--drone-battery-cost",
+    type=float,
+    default=0.0,
+    help="added battery cost to simulate drone transport per conveyor/pipeline of mined resource",
+)
+parser.add_argument(
+    "--miner-clocks",
+    type=str,
+    default="2.5",
+    help="clock choices for miners (excluding Water Extractors)",
+)
+parser.add_argument(
+    "--manufacturer-clocks",
+    type=str,
+    default="0-1/0.25,1.5-2.5/0.5",
+    help="clock choices for non-somerslooped manufacturers (plus Water Extractors)",
+)
+parser.add_argument(
+    "--somersloop-clocks",
+    type=str,
+    default="2.5",
+    help="clock choices for somerslooped manufacturers",
+)
+parser.add_argument(
+    "--generator-clocks",
+    type=str,
+    default="2.5",
+    help="clock choices for power generators",
+)
+parser.add_argument(
+    "--num-alien-power-augmenters",
+    type=int,
+    default=0,
+    help="number of Alien Power Augmenters to build",
+)
+parser.add_argument(
+    "--num-fueled-alien-power-augmenters",
+    type=float,
+    default=0,
+    help="number of Alien Power Augmenters to fuel with Alien Power Matrix",
+)
+parser.add_argument(
+    "--disable-production-amplification",
+    action="store_true",
+    help="disable usage of somersloops in manufacturers",
+)
+parser.add_argument(
+    "--allow-waste",
+    action="store_true",
+    help="allow accumulation of nuclear waste and other unsinkable items",
+)
+parser.add_argument(
+    "--show-unused",
+    action="store_true",
+    help="show unused LP columns (coeff 0) in the optimization result",
+)
+parser.add_argument(
+    "--dump-debug-info",
+    action="store_true",
+    help="dump debug info to DebugInfo.txt (items, recipes, LP matrix, etc.)",
+)
+parser.add_argument(
+    "--xlsx-report", type=str, default="Report.xlsx", help="path to xlsx report output"
+)
+parser.add_argument(
+    "--xlsx-sheet-suffix",
+    type=str,
+    default="",
+    help="suffix to add to xlsx sheet names",
+)
 args = parser.parse_args()
 
 ### Constants ###
 
 # Common
+
 STACK_SIZES = {
     "SS_HUGE": 500,
     "SS_BIG": 200,
@@ -52,35 +127,77 @@ STACK_SIZES = {
     "SS_ONE": 1,
     "SS_FLUID": 50000,
 }
-MACHINE_POWER_SHARD_LIMIT = 3
-EPSILON = 1e-9
+
+# Clock speeds
+INVERSE_CLOCK_GRANULARITY = 100 * 10000
+
+
+def float_to_clock(value: float) -> Fraction:
+    return Fraction(round(value * INVERSE_CLOCK_GRANULARITY), INVERSE_CLOCK_GRANULARITY)
+
+
+def str_to_clock(s: str) -> Fraction:
+    return float_to_clock(float(s))
+
+
+def clock_to_percent_str(clock: Fraction) -> str:
+    return f"{float(100 * clock)}%"
+
+
+MACHINE_BASE_CLOCK = float_to_clock(1.0)
+MACHINE_MAX_CLOCK = float_to_clock(2.5)
 
 # Logistics
-CONVEYOR_BELT_CLASS = "Build_ConveyorBeltMk5_C"
+CONVEYOR_BELT_CLASS = "Build_ConveyorBeltMk6_C"
 PIPELINE_CLASS = "Build_PipelineMK2_C"
 
-# Resource extraction
+# Miners
 MINER_CLASS = "Build_MinerMk3_C"
 OIL_EXTRACTOR_CLASS = "Build_OilPump_C"
 WATER_EXTRACTOR_CLASS = "Build_WaterPump_C"
 RESOURCE_WELL_EXTRACTOR_CLASS = "Build_FrackingExtractor_C"
 RESOURCE_WELL_PRESSURIZER_CLASS = "Build_FrackingSmasher_C"
+ALL_MINER_CLASSES = (
+    MINER_CLASS,
+    OIL_EXTRACTOR_CLASS,
+    WATER_EXTRACTOR_CLASS,
+    RESOURCE_WELL_PRESSURIZER_CLASS,
+)
 
 # Sink
 SINK_CLASS = "Build_ResourceSink_C"
 
+# Items
+ALL_ITEM_NATIVE_CLASSES = (
+    "FGItemDescriptor",
+    "FGItemDescriptorBiomass",
+    "FGItemDescriptorNuclearFuel",
+    "FGItemDescriptorPowerBoosterFuel",
+    "FGResourceDescriptor",
+    "FGEquipmentDescriptor",
+    "FGConsumableDescriptor",
+    "FGPowerShardDescriptor",
+    "FGAmmoTypeProjectile",
+    "FGAmmoTypeInstantHit",
+    "FGAmmoTypeSpreadshot",
+)
+
 # Water
 WATER_CLASS = "Desc_Water_C"
 
-# Nuclear power
-NUCLEAR_WASTE_MAPPINGS = {
-    "Desc_NuclearFuelRod_C": "Desc_NuclearWaste_C",
-    "Desc_PlutoniumFuelRod_C": "Desc_PlutoniumWaste_C",
-}
+# Generators (excl. geothermal)
+ALL_GENERATOR_NATIVE_CLASSES = (
+    "FGBuildableGeneratorFuel",
+    "FGBuildableGeneratorNuclear",
+)
 
-# Geothermal power
+# Geothermal generator
 GEOTHERMAL_GENERATOR_CLASS = "Build_GeneratorGeoThermal_C"
 GEYSER_CLASS = "Desc_Geyser_C"
+
+# Alien Power Augmenter
+ALIEN_POWER_AUGMENTER_CLASS = "Build_AlienPowerBuilding_C"
+ALIEN_POWER_MATRIX_CLASS = "Desc_AlienPowerFuel_C"
 
 # Resource map
 PURITY_MULTIPLIERS = {
@@ -88,636 +205,1202 @@ PURITY_MULTIPLIERS = {
     "normal": 1.0,
     "pure": 2.0,
 }
-POWER_SLUG_SHARDS = {
-    "greenSlugs": 1,
-    "yellowSlugs": 2,
-    "purpleSlugs": 5,
-}
 RESOURCE_MAPPINGS = {
     "Desc_LiquidOilWell_C": "Desc_LiquidOil_C",
-    "Desc_SAM_C": None,  # exclude
 }
 
 # Miscellaneous
-BIOMASS_GENERATOR_CLASS = "Build_GeneratorBiomass_C"
 BATTERY_CLASS = "Desc_Battery_C"
-ADDITIONAL_ITEMS = {
-    "Desc_PlutoniumWaste_C": {
-        "class": "Desc_PlutoniumWaste_C",
-        "display_name": "Plutonium Waste",
-        "form": "RF_SOLID",
-        "points": 0,
-        "stack_size": STACK_SIZES["SS_HUGE"],
-        "energy": 0.0,
-    },
-}
 ADDITIONAL_DISPLAY_NAMES = {
     GEYSER_CLASS: "Geyser",
 }
 
 
-docs_path = r"Docs.json"
-map_info_path = r"MapInfo.json"
+### Debug ###
 
-with open(docs_path, "r", encoding="utf-16") as f:
+DEBUG_INFO_PATH = r"DebugInfo.txt"
+PPRINT_WIDTH = 120
+
+debug_file = (
+    open(DEBUG_INFO_PATH, mode="w", encoding="utf-8") if args.dump_debug_info else None
+)
+
+
+def debug_dump(heading: str, obj: object):
+    if debug_file is None:
+        return
+    print(f"========== {heading} ==========", file=debug_file)
+    print("", file=debug_file)
+    if isinstance(obj, str):
+        print(obj, file=debug_file)
+    else:
+        pprint(obj, stream=debug_file, width=PPRINT_WIDTH, sort_dicts=False)
+    print("", file=debug_file)
+
+
+### Configured clock speeds ###
+
+
+def parse_clock_spec(s: str) -> list[Fraction]:
+    result: list[Fraction] = []
+    for token in s.split(","):
+        token = token.strip()
+        if "/" in token:
+            bounds, _, step_str = token.rpartition("/")
+            lower_str, _, upper_str = bounds.rpartition("-")
+            lower = str_to_clock(lower_str)
+            upper = str_to_clock(upper_str)
+            step = str_to_clock(step_str)
+            current = lower
+            while current <= upper:
+                result.append(current)
+                current += step
+        else:
+            result.append(str_to_clock(token))
+    result.sort()
+    return result
+
+
+MINER_CLOCKS = parse_clock_spec(args.miner_clocks)
+MANUFACTURER_CLOCKS = parse_clock_spec(args.manufacturer_clocks)
+SOMERSLOOP_CLOCKS = parse_clock_spec(args.somersloop_clocks)
+GENERATOR_CLOCKS = parse_clock_spec(args.generator_clocks)
+
+debug_dump(
+    "Configured clock speeds",
+    f"""
+{MINER_CLOCKS=}
+{MANUFACTURER_CLOCKS=}
+{SOMERSLOOP_CLOCKS=}
+{GENERATOR_CLOCKS=}
+""".strip(),
+)
+
+### Load json ###
+
+DOCS_PATH = r"Docs.json"
+MAP_INFO_PATH = r"MapInfo.json"
+
+
+with open(DOCS_PATH, "r", encoding="utf-16") as f:
     docs_raw = json.load(f)
 
-class_entries = {}
-class_types = {}
 
-for fg_entry in docs_raw:
-    class_type = re.sub(r"Class'/Script/FactoryGame.(\w+)'", r"\1", fg_entry["NativeClass"])
-    class_type_list = []
+### Initial parsing ###
+
+class_name_to_entry: dict[str, dict[str, Any]] = {}
+native_class_to_class_entries: dict[str, list[dict[str, Any]]] = {}
+
+NATIVE_CLASS_REGEX = re.compile(r"/Script/CoreUObject.Class'/Script/FactoryGame.(\w+)'")
+
+
+def parse_and_add_fg_entry(fg_entry: dict[str, Any]):
+    m = NATIVE_CLASS_REGEX.fullmatch(fg_entry["NativeClass"])
+    assert m is not None, fg_entry["NativeClass"]
+    native_class = m.group(1)
+
+    class_entries: list[dict[str, Any]] = []
     for class_entry in fg_entry["Classes"]:
         class_name = class_entry["ClassName"]
-        if class_name in class_entries:
+        if class_name in class_name_to_entry:
             print(f"WARNING: ignoring duplicate class {class_name}")
         else:
-            class_entries[class_name] = class_entry
-            class_type_list.append(class_entry)
-    class_types[class_type] = class_type_list
+            class_name_to_entry[class_name] = class_entry
+            class_entries.append(class_entry)
+    native_class_to_class_entries[native_class] = class_entries
+
+
+for fg_entry in docs_raw:
+    parse_and_add_fg_entry(fg_entry)
 
 
 ### Parsing helpers ###
 
-def parse_paren_list(s):
+
+def parse_paren_list(s: str) -> list[str] | None:
     if not s:
         return None
-    assert(s.startswith("(") and s.endswith(")"))
+    assert s.startswith("(") and s.endswith(")")
     s = s[1:-1]
     if not s:
         return []
     else:
         return s.split(",")
 
-def find_class_name(s):
-    m = re.search(r"\.\w+", s)
-    if m is None:
-        raise ValueError(f"could not find class name in: {s}")
-    return m[0][1:]
 
-def parse_class_list(s):
+QUALIFIED_CLASS_NAME_REGEX = re.compile(r"\"?/Script/[^']+'/[\w\-/]+\.(\w+)'\"?")
+UNQUALIIFIED_CLASS_NAME_REGEX = re.compile(r"\"?/[\w\-/]+\.(\w+)\"?")
+PERSISTENT_LEVEL_CLASS_NAME_REGEX = re.compile(
+    r"Persistent_Level:PersistentLevel\.(\w+)"
+)
+
+
+def extract_class_name(s: str) -> str:
+    m = (
+        QUALIFIED_CLASS_NAME_REGEX.fullmatch(s)
+        or UNQUALIIFIED_CLASS_NAME_REGEX.fullmatch(s)
+        or PERSISTENT_LEVEL_CLASS_NAME_REGEX.fullmatch(s)
+    )
+    assert m is not None, s
+    return m.group(1)
+
+
+def parse_class_list(s: str) -> list[str] | None:
     l = parse_paren_list(s)
     if l is None:
-        return l
-    return [find_class_name(x) for x in l]
+        return None
+    return [extract_class_name(x) for x in l]
 
-def find_item_amounts(s):
-    for m in re.finditer(r"\(ItemClass=([^,]+),Amount=(\d+)\)", s):
-        yield (find_class_name(m[1]), int(m[2]))
+
+ITEM_AMOUNT_REGEX = re.compile(r"\(ItemClass=([^,]+),Amount=(\d+)\)")
+
+
+def find_item_amounts(s: str) -> Iterable[tuple[str, int]]:
+    for m in ITEM_AMOUNT_REGEX.finditer(s):
+        yield (extract_class_name(m[1]), int(m[2]))
 
 
 ### Misc constants ###
 
-CONVEYOR_BELT_LIMIT = 0.5 * float(class_entries[CONVEYOR_BELT_CLASS]["mSpeed"])
-PIPELINE_LIMIT = 60000.0 * float(class_entries[PIPELINE_CLASS]["mFlowLimit"])
-SINK_POWER_CONSUMPTION = float(class_entries[SINK_CLASS]["mPowerConsumption"])
+CONVEYOR_BELT_LIMIT = 0.5 * float(class_name_to_entry[CONVEYOR_BELT_CLASS]["mSpeed"])
+PIPELINE_LIMIT = 60000.0 * float(class_name_to_entry[PIPELINE_CLASS]["mFlowLimit"])
+SINK_POWER_CONSUMPTION = float(class_name_to_entry[SINK_CLASS]["mPowerConsumption"])
 
-print(f"CONVEYOR_BELT_LIMIT: {CONVEYOR_BELT_LIMIT}")
-print(f"PIPELINE_LIMIT: {PIPELINE_LIMIT}")
-print(f"SINK_POWER_CONSUMPTION: {SINK_POWER_CONSUMPTION}")
+debug_dump(
+    "Misc constants",
+    f"""
+{CONVEYOR_BELT_LIMIT=}
+{PIPELINE_LIMIT=}
+{SINK_POWER_CONSUMPTION=}
+""".strip(),
+)
+
+
+ALIEN_POWER_AUGMENTER_STATIC_POWER = float(
+    class_name_to_entry[ALIEN_POWER_AUGMENTER_CLASS]["mBasePowerProduction"]
+)
+ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST = float(
+    class_name_to_entry[ALIEN_POWER_AUGMENTER_CLASS]["mBaseBoostPercentage"]
+)
+ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST = (
+    ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST
+    + float(class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostPercentage"])
+)
+ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE = 60.0 / float(
+    class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostDuration"]
+)
+
+
+debug_dump(
+    "Alien Power Augmenter constants",
+    f"""
+{ALIEN_POWER_AUGMENTER_STATIC_POWER=}
+{ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST=}
+{ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST=}
+{ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE=}
+""".strip(),
+)
+
+### Classes ###
+
+
+@dataclass
+class ClassObject:
+    class_name: str
+    display_name: str
+
+
+@dataclass
+class Machine(ClassObject):
+    min_clock: Fraction
+    max_clock: Fraction
+
+
+@dataclass
+class PowerConsumer(Machine):
+    power_consumption: float
+    power_consumption_exponent: float
+    is_variable_power: bool
+
+
+@dataclass
+class Miner(PowerConsumer):
+    extraction_rate_base: float
+    uses_resource_wells: bool
+    allowed_resource_forms: list[str]
+    only_allow_certain_resources: bool
+    allowed_resources: list[str] | None
+
+    def check_allowed_resource(self, item_class: str, form: str) -> bool:
+        if form not in self.allowed_resource_forms:
+            return False
+        if self.only_allow_certain_resources:
+            assert self.allowed_resources
+            return item_class in self.allowed_resources
+        else:
+            return True
+
+
+@dataclass
+class Manufacturer(PowerConsumer):
+    can_change_production_boost: bool
+    base_production_boost: float
+    production_shard_slot_size: int
+    production_shard_boost_multiplier: float
+    production_boost_power_consumption_exponent: float
+
+
+@dataclass
+class Recipe(ClassObject):
+    manufacturer: str
+    inputs: list[tuple[str, float]]
+    outputs: list[tuple[str, float]]
+    mean_variable_power_consumption: float
+
+
+@dataclass
+class Item(ClassObject):
+    class_name: str
+    display_name: str
+    form: str
+    points: int
+    stack_size: int
+    energy: float
+
+
+@dataclass
+class Fuel:
+    fuel_class: str
+    supplemental_resource_class: str | None
+    byproduct: str | None
+    byproduct_amount: int
+
+
+@dataclass
+class PowerGenerator(Machine):
+    fuels: list[Fuel]
+    power_production: float
+    requires_supplemental: bool
+    supplemental_to_power_ratio: float
+
+
+@dataclass
+class GeothermalGenerator(Machine):
+    mean_variable_power_production: float
 
 
 ### Miners ###
 
-def parse_miner(entry):
+
+def parse_miner(entry: dict[str, Any]) -> Miner:
+    # Resource well extractors are aggregated under the pressurizer
     if entry["ClassName"] == RESOURCE_WELL_PRESSURIZER_CLASS:
-        extractor = class_entries[RESOURCE_WELL_EXTRACTOR_CLASS]
+        extractor = class_name_to_entry[RESOURCE_WELL_EXTRACTOR_CLASS]
+        uses_resource_wells = True
     else:
         extractor = entry
+        uses_resource_wells = False
 
-    return {
-        "class": entry["ClassName"],
-        "display_name": entry["mDisplayName"],
-        "power_consumption": float(entry["mPowerConsumption"]),
-        "power_consumption_exponent": float(entry["mPowerConsumptionExponent"]),
-        "min_clock": float(entry["mMinPotential"]),
-        "max_clock_base": float(entry["mMaxPotential"]),
-        "max_clock_per_power_shard": float(entry["mMaxPotentialIncreasePerCrystal"]),
-        "rate": 60.0 / float(extractor["mExtractCycleTime"]) * float(extractor["mItemsPerCycle"]),
-        "only_allow_certain_resources": (extractor["mOnlyAllowCertainResources"] == "True"),
-        "allowed_resource_forms": parse_paren_list(extractor["mAllowedResourceForms"]),
-        "allowed_resources": parse_class_list(extractor["mAllowedResources"]),
-    }
+    assert entry["mCanChangePotential"] == "True"
+    assert str_to_clock(entry["mMaxPotential"]) == MACHINE_BASE_CLOCK
 
-miners = {}
-for name in (MINER_CLASS, OIL_EXTRACTOR_CLASS, WATER_EXTRACTOR_CLASS, RESOURCE_WELL_PRESSURIZER_CLASS):
-    miners[name] = parse_miner(class_entries[name])
+    assert entry["mCanChangeProductionBoost"] == "False"
 
-# pprint(miners)
+    # This will be multiplied by the purity when applied to a node
+    # (or, for resource wells, the sum of satellite purities).
+    extraction_rate_base = (
+        60.0
+        / float(extractor["mExtractCycleTime"])
+        * float(extractor["mItemsPerCycle"])
+    )
+
+    allowed_resource_forms = parse_paren_list(extractor["mAllowedResourceForms"])
+    assert allowed_resource_forms is not None
+
+    return Miner(
+        class_name=entry["ClassName"],
+        display_name=entry["mDisplayName"],
+        power_consumption=float(entry["mPowerConsumption"]),
+        power_consumption_exponent=float(entry["mPowerConsumptionExponent"]),
+        min_clock=str_to_clock(entry["mMinPotential"]),
+        max_clock=MACHINE_MAX_CLOCK,
+        is_variable_power=False,
+        extraction_rate_base=extraction_rate_base,
+        uses_resource_wells=uses_resource_wells,
+        allowed_resource_forms=allowed_resource_forms,
+        only_allow_certain_resources=(
+            extractor["mOnlyAllowCertainResources"] == "True"
+        ),
+        allowed_resources=parse_class_list(extractor["mAllowedResources"]),
+    )
+
+
+miners: dict[str, Miner] = {}
+
+for class_name in ALL_MINER_CLASSES:
+    miners[class_name] = parse_miner(class_name_to_entry[class_name])
+
+debug_dump("Parsed miners", miners)
 
 
 ### Manufacturers ###
 
-def parse_manufacturer(entry):
-    return {
-        "class": entry["ClassName"],
-        "display_name": entry["mDisplayName"],
-        "power_consumption": float(entry["mPowerConsumption"]),
-        "power_consumption_exponent": float(entry["mPowerConsumptionExponent"]),
-        "min_clock": float(entry["mMinPotential"]),
-        "max_clock_base": float(entry["mMaxPotential"]),
-        "max_clock_per_power_shard": float(entry["mMaxPotentialIncreasePerCrystal"]),
-    }
 
-manufacturers = {}
+def parse_manufacturer(entry: dict[str, Any], is_variable_power: bool) -> Manufacturer:
+    class_name = entry["ClassName"]
 
-for entry in class_types["FGBuildableManufacturer"]:
-    manufacturer = parse_manufacturer(entry)
-    manufacturer["is_variable_power"] = False
-    manufacturers[entry["ClassName"]] = manufacturer
+    assert entry["mCanChangePotential"] == "True"
+    assert str_to_clock(entry["mMaxPotential"]) == MACHINE_BASE_CLOCK
 
-for entry in class_types["FGBuildableManufacturerVariablePower"]:
-    manufacturer = parse_manufacturer(entry)
-    manufacturer["is_variable_power"] = True
-    manufacturers[entry["ClassName"]] = manufacturer
+    can_change_production_boost = entry["mCanChangeProductionBoost"] == "True"
+    production_shard_slot_size = int(entry["mProductionShardSlotSize"])
 
-# pprint(manufacturers)
+    # Smelter has "mProductionShardSlotSize": "0" when it should be 1
+    if class_name == "Build_SmelterMk1_C":
+        assert can_change_production_boost
+        if production_shard_slot_size == 0:
+            production_shard_slot_size = 1
+
+    return Manufacturer(
+        class_name=class_name,
+        display_name=entry["mDisplayName"],
+        power_consumption=float(entry["mPowerConsumption"]),
+        power_consumption_exponent=float(entry["mPowerConsumptionExponent"]),
+        min_clock=str_to_clock(entry["mMinPotential"]),
+        max_clock=MACHINE_MAX_CLOCK,
+        is_variable_power=is_variable_power,
+        can_change_production_boost=(entry["mCanChangeProductionBoost"] == "True"),
+        base_production_boost=float(entry["mBaseProductionBoost"]),
+        production_shard_slot_size=production_shard_slot_size,
+        production_shard_boost_multiplier=float(
+            entry["mProductionShardBoostMultiplier"]
+        ),
+        production_boost_power_consumption_exponent=float(
+            entry["mProductionBoostPowerConsumptionExponent"]
+        ),
+    )
+
+
+manufacturers: dict[str, Manufacturer] = {}
+
+for entry in native_class_to_class_entries["FGBuildableManufacturer"]:
+    manufacturer = parse_manufacturer(entry, is_variable_power=False)
+    manufacturers[manufacturer.class_name] = manufacturer
+
+for entry in native_class_to_class_entries["FGBuildableManufacturerVariablePower"]:
+    manufacturer = parse_manufacturer(entry, is_variable_power=True)
+    manufacturers[manufacturer.class_name] = manufacturer
+
+debug_dump("Parsed manufacturers", manufacturers)
 
 
 ### Recipes ###
 
-def parse_recipe(entry):
+
+def parse_recipe(entry: dict[str, Any]) -> Recipe | None:
+    produced_in = parse_class_list(entry["mProducedIn"]) or []
     recipe_manufacturer = None
-    for manufacturer in parse_class_list(entry["mProducedIn"]) or []:
+
+    for manufacturer in produced_in:
         if manufacturer in manufacturers:
             recipe_manufacturer = manufacturer
             break
 
-    # we are only considering automatable recipes
     if recipe_manufacturer is None:
+        # check that recipe is not automatable for known reasons
+        assert (
+            not produced_in
+            or "BP_WorkshopComponent_C" in produced_in
+            or "BP_BuildGun_C" in produced_in
+            or "FGBuildGun" in produced_in
+        ), f"{entry["mDisplayName"]} {produced_in}"
         return None
 
-    rate = 60.0 / float(entry["mManufactoringDuration"])
-    def item_rates(key):
-        return [(item, rate * amount) for (item, amount) in find_item_amounts(entry[key])]
+    recipe_rate = 60.0 / float(entry["mManufactoringDuration"])
+
+    def item_rates(key: str):
+        return [
+            (item, recipe_rate * amount)
+            for (item, amount) in find_item_amounts(entry[key])
+        ]
 
     vpc_constant = float(entry["mVariablePowerConsumptionConstant"])
     vpc_factor = float(entry["mVariablePowerConsumptionFactor"])
+    # Assuming the mean is exactly halfway for all of the variable power machine types.
+    # This appears to be accurate but it's hard to confirm exactly.
+    mean_variable_power_consumption = vpc_constant + 0.5 * vpc_factor
 
-    return {
-        "class": entry["ClassName"],
-        "display_name": entry["mDisplayName"],
-        "manufacturer": recipe_manufacturer,
-        "inputs": item_rates("mIngredients"),
-        "outputs": item_rates("mProduct"),
-        "variable_power_consumption": vpc_constant + 0.5 * vpc_factor,
-    }
+    return Recipe(
+        class_name=entry["ClassName"],
+        display_name=entry["mDisplayName"],
+        manufacturer=recipe_manufacturer,
+        inputs=item_rates("mIngredients"),
+        outputs=item_rates("mProduct"),
+        mean_variable_power_consumption=mean_variable_power_consumption,
+    )
 
-recipes = {}
-for entry in class_types["FGRecipe"]:
+
+recipes: dict[str, Recipe] = {}
+
+for entry in native_class_to_class_entries["FGRecipe"]:
     recipe = parse_recipe(entry)
     if recipe is not None:
-        recipes[entry["ClassName"]] = recipe
+        recipes[recipe.class_name] = recipe
 
-# pprint(recipes)
+
+debug_dump("Parsed recipes", recipes)
 
 
 ### Items ###
 
-def parse_item(entry):
-    points = int(entry["mResourceSinkPoints"])
-    return {
-        "display_name": entry["mDisplayName"],
-        "form": entry["mForm"],
-        "points": int(entry["mResourceSinkPoints"]),
-        "stack_size": STACK_SIZES[entry["mStackSize"]],
-        "energy": float(entry["mEnergyValue"]),
-    }
 
-items = {}
+def parse_item(entry: dict[str, Any]) -> Item:
+    return Item(
+        class_name=entry["ClassName"],
+        display_name=entry["mDisplayName"],
+        form=entry["mForm"],
+        points=int(entry["mResourceSinkPoints"]),
+        stack_size=STACK_SIZES[entry["mStackSize"]],
+        energy=float(entry["mEnergyValue"]),
+    )
 
-# any items not contained in Docs.json
-items.update(ADDITIONAL_ITEMS)
 
-for class_type in [
-    "FGItemDescriptor",
-    "FGItemDescriptorBiomass",
-    "FGItemDescriptorNuclearFuel",
-    "FGResourceDescriptor",
-    "FGEquipmentDescriptor",
-    "FGConsumableDescriptor",
-]:
-    for entry in class_types[class_type]:
+items: dict[str, Item] = {}
+
+
+for native_class in ALL_ITEM_NATIVE_CLASSES:
+    for entry in native_class_to_class_entries[native_class]:
         item = parse_item(entry)
-        if class_type == "FGItemDescriptorNuclearFuel":
-            item["nuclear_waste"] = NUCLEAR_WASTE_MAPPINGS[entry["ClassName"]]
-            item["nuclear_waste_amount"] = float(entry["mAmountOfWaste"])
-        items[entry["ClassName"]] = item
+        items[item.class_name] = item
 
-# pprint(items)
+debug_dump("Parsed items", items)
 
 
 ### Generators ###
 
-generators = {}
 
-def parse_generator(entry):
-    power_production = float(entry["mPowerProduction"])
-    return {
-        "display_name": entry["mDisplayName"],
-        "fuel_classes": parse_class_list(entry["mDefaultFuelClasses"]),
-        "power_production": power_production,
-        "power_production_exponent": float(entry["mPowerProductionExponent"]),
-        "requires_supplemental": (entry["mRequiresSupplementalResource"] == "True"),
-        "supplemental_to_power_ratio": float(entry["mSupplementalToPowerRatio"]),
-    }
+def parse_fuel(entry: dict[str, Any]) -> Fuel:
+    byproduct_amount = entry["mByproductAmount"]
+    return Fuel(
+        fuel_class=entry["mFuelClass"],
+        supplemental_resource_class=entry["mSupplementalResourceClass"] or None,
+        byproduct=entry["mByproduct"] or None,
+        byproduct_amount=int(byproduct_amount) if byproduct_amount else 0,
+    )
 
-def parse_geothermal_generator(entry):
-    # unclear why mVariablePowerProductionConstant=0 in the json;
-    # it's set to 100.0f in the header, which we will hardcode here
-    return {
-        "display_name": entry["mDisplayName"],
-        "power_production": 100.0 + 0.5 * float(entry["mVariablePowerProductionFactor"]),
-    }
 
-# coal and fuel generators
-for entry in class_types["FGBuildableGeneratorFuel"]:
-    # exclude biomass generator
-    if entry["ClassName"] == BIOMASS_GENERATOR_CLASS:
-        continue
+def parse_generator(entry: dict[str, Any]) -> PowerGenerator:
+    fuels = [parse_fuel(fuel) for fuel in entry["mFuel"]]
 
-    generators[entry["ClassName"]] = parse_generator(entry)
+    assert entry["mCanChangePotential"] == "True"
+    assert str_to_clock(entry["mMaxPotential"]) == MACHINE_BASE_CLOCK
 
-# nuclear power plant
-for entry in class_types["FGBuildableGeneratorNuclear"]:
-    generators[entry["ClassName"]] = parse_generator(entry)
+    return PowerGenerator(
+        class_name=entry["ClassName"],
+        display_name=entry["mDisplayName"],
+        fuels=fuels,
+        power_production=float(entry["mPowerProduction"]),
+        min_clock=str_to_clock(entry["mMinPotential"]),
+        max_clock=MACHINE_MAX_CLOCK,
+        requires_supplemental=(entry["mRequiresSupplementalResource"] == "True"),
+        supplemental_to_power_ratio=float(entry["mSupplementalToPowerRatio"]),
+    )
+
+
+def parse_geothermal_generator(entry: dict[str, Any]) -> GeothermalGenerator:
+    # "mVariablePowerProductionConstant": "0.000000" should be 100 MW, hardcode it here
+    vpp_constant = 100.0
+    vpp_factor = float(entry["mVariablePowerProductionFactor"])
+    # Assuming the mean power production is exactly halfway.
+    mean_variable_power_production = vpp_constant + 0.5 * vpp_factor
+
+    assert entry["mCanChangePotential"] == "False"
+
+    return GeothermalGenerator(
+        class_name=entry["ClassName"],
+        display_name=entry["mDisplayName"],
+        min_clock=MACHINE_BASE_CLOCK,
+        max_clock=MACHINE_BASE_CLOCK,
+        mean_variable_power_production=mean_variable_power_production,
+    )
+
+
+generators: dict[str, PowerGenerator] = {}
+
+for native_class in ALL_GENERATOR_NATIVE_CLASSES:
+    for entry in native_class_to_class_entries[native_class]:
+        generator = parse_generator(entry)
+        generators[generator.class_name] = generator
 
 # geothermal generator (special case)
-geothermal_generator = parse_geothermal_generator(class_entries[GEOTHERMAL_GENERATOR_CLASS])
+geothermal_generator = parse_geothermal_generator(
+    class_name_to_entry[GEOTHERMAL_GENERATOR_CLASS]
+)
 
-# pprint(generators)
+debug_dump("Parsed generators", generators)
+debug_dump("Parsed geothermal generator", geothermal_generator)
 
 
-### Resources ###
+### Map info ###
 
-with open(map_info_path, "r") as f:
+
+with open(MAP_INFO_PATH, "r") as f:
     map_info_raw = json.load(f)
 
-map_info = {}
+map_info: dict[str, Any] = {}
 
 for tab in map_info_raw["options"]:
     if "tabId" in tab:
         map_info[tab["tabId"]] = tab["options"]
 
-TOTAL_POWER_SHARDS = 0
-for slug_type in map_info["power_slugs"][0]["options"]:
-    TOTAL_POWER_SHARDS += POWER_SLUG_SHARDS[slug_type["layerId"]] * len(slug_type["markers"])
 
-print(f"TOTAL_POWER_SHARDS: {TOTAL_POWER_SHARDS}")
+### Resources ###
 
-resources = {}
-geysers = {}
 
-def parse_and_add_node_type(node_type):
-    if "type" not in node_type:
+@dataclass
+class Resource:
+    resource_id: str
+    item_class: str
+    subtype: str
+    multiplier: float
+    is_unlimited: bool
+    count: int
+    is_resource_well: bool
+    num_satellites: int
+
+
+resources: dict[str, Resource] = {}
+geysers: dict[str, Resource] = {}
+
+
+def parse_and_add_resources(map_resource: dict[str, Any]):
+    if "type" not in map_resource:
         return
 
-    item = node_type["type"]
-    if item in RESOURCE_MAPPINGS:
-        item = RESOURCE_MAPPINGS[item]
+    item_class = map_resource["type"]
+    if item_class in RESOURCE_MAPPINGS:
+        item_class = RESOURCE_MAPPINGS[item_class]
 
-    if item is None:
-        return
+    if item_class == GEYSER_CLASS:
+        output = geysers
+    else:
+        output = resources
+        assert item_class in items, f"map has unknown resource: {item_class}"
 
-    output = geysers if item == GEYSER_CLASS else resources
-
-    for node_purity in node_type["options"]:
+    for node_purity in map_resource["options"]:
         purity = node_purity["purity"]
         nodes = node_purity["markers"]
         if not nodes:
             continue
         sample_node = nodes[0]
         if "core" in sample_node:
-            # resource well satellite nodes, map them to cores
+            # resource well satellite nodes, map to cores and sum the purity multipliers
             for node in nodes:
-                subtype = find_class_name(node["core"])
-                resource_id = f"{item}|{subtype}"
+                subtype = extract_class_name(node["core"])  # specific FrackingCore
+                resource_id = f"{item_class}|{subtype}"
                 if resource_id not in output:
-                    output[resource_id] = {
-                        "resource_id": resource_id,
-                        "item": item,
-                        "subtype": subtype,
-                        "multiplier": 0.0,
-                        "count": 1,
-                        "is_limited": True,
-                        "is_resource_well": True,
-                        "num_satellites": 0,
-                    }
-                output[resource_id]["multiplier"] += PURITY_MULTIPLIERS[purity]
-                output[resource_id]["num_satellites"] += 1
+                    output[resource_id] = Resource(
+                        resource_id=resource_id,
+                        item_class=item_class,
+                        subtype=subtype,
+                        multiplier=0.0,
+                        is_unlimited=False,
+                        count=1,
+                        is_resource_well=True,
+                        num_satellites=0,
+                    )
+                output[resource_id].multiplier += PURITY_MULTIPLIERS[purity]
+                output[resource_id].num_satellites += 1
         else:
             # normal nodes, add directly
-            subtype = purity
-            resource_id = f"{item}|{subtype}"
-            assert(resource_id not in output)
-            output[resource_id] = {
-                "resource_id": resource_id,
-                "item": item,
-                "subtype": subtype,
-                "multiplier": PURITY_MULTIPLIERS[purity],
-                "count": len(nodes),
-                "is_limited": True,
-                "is_resource_well": False,
-            }
-
-for node_type in map_info["resource_nodes"]:
-    parse_and_add_node_type(node_type)
-
-for node_type in map_info["resource_wells"]:
-    parse_and_add_node_type(node_type)
-
-resources[WATER_CLASS] = {
-    "resource_id": f"{WATER_CLASS}:extractor",
-    "item": WATER_CLASS,
-    "subtype": "extractor",
-    "multiplier": 1,
-    "is_limited": False,
-    "is_resource_well": False,
-}
-
-# pprint(resources)
-# pprint(geysers)
+            subtype = purity  # individual nodes are indistinguishable
+            resource_id = f"{item_class}|{subtype}"
+            assert resource_id not in output
+            output[resource_id] = Resource(
+                resource_id=resource_id,
+                item_class=item_class,
+                subtype=subtype,
+                multiplier=PURITY_MULTIPLIERS[purity],
+                is_unlimited=False,
+                count=len(nodes),
+                is_resource_well=False,
+                num_satellites=0,
+            )
 
 
-### LP setup ###
+for map_resource in map_info["resource_nodes"]:
+    parse_and_add_resources(map_resource)
 
-class LPColumn(dict):
-    def __init__(self, *args, display_info=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.display_info = display_info
+for map_resource in map_info["resource_wells"]:
+    parse_and_add_resources(map_resource)
 
-lp_columns = {}
-lp_equalities = {}
-lp_lower_bounds = {}
+# Water from extractors is a special infinite resource
+resources[f"{WATER_CLASS}|extractor"] = Resource(
+    resource_id=f"{WATER_CLASS}|extractor",
+    item_class=WATER_CLASS,
+    subtype="extractor",
+    multiplier=1,
+    is_unlimited=True,
+    count=0,
+    is_resource_well=False,
+    num_satellites=0,
+)
 
-def get_power_consumption(machine, clock=1.0, recipe=None):
-    power_consumption = machine["power_consumption"]
-    if recipe is not None and machine.get("is_variable_power", False):
-        power_consumption += recipe["variable_power_consumption"]
+debug_dump("Parsed resources", resources)
+debug_dump("Parsed geysers", geysers)
 
-    return power_consumption * (clock ** machine["power_consumption_exponent"])
 
-def get_miner_for_resource(resource):
-    item_class = resource["item"]
+### Somersloops ###
+
+
+def find_somersloops_map_layer(
+    map_tab_artifacts: list[dict[str, list[dict[str, Any]]]]
+):
+    for unknown_level in map_tab_artifacts:
+        for map_layer in unknown_level["options"]:
+            if map_layer["layerId"] == "somersloops":
+                return map_layer
+    raise RuntimeError("failed to find somersloops map layer")
+
+
+def parse_num_somersloops_on_map(somersloops_map_layer: dict[str, Any]) -> int:
+    count = 0
+    for marker in somersloops_map_layer["markers"]:
+        if marker["type"] == "somersloop":
+            count += 1
+    return count
+
+
+NUM_SOMERSLOOPS_ON_MAP = parse_num_somersloops_on_map(
+    find_somersloops_map_layer(map_info["artifacts"])
+)
+
+PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST = 1
+ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST = 1
+ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST = 10
+
+NUM_ALIEN_POWER_AUGMENTERS: int = args.num_alien_power_augmenters
+NUM_FUELED_ALIEN_POWER_AUGMENTERS: float = args.num_fueled_alien_power_augmenters
+
+assert NUM_FUELED_ALIEN_POWER_AUGMENTERS <= NUM_ALIEN_POWER_AUGMENTERS
+
+TOTAL_FIXED_SOMERSLOOP_COST = (
+    (
+        PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST
+        if not args.disable_production_amplification
+        else 0
+    )
+    + (
+        ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST
+        if NUM_ALIEN_POWER_AUGMENTERS > 0
+        else 0
+    )
+    + (ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST * NUM_ALIEN_POWER_AUGMENTERS)
+)
+
+assert (
+    TOTAL_FIXED_SOMERSLOOP_COST <= NUM_SOMERSLOOPS_ON_MAP
+), f"{TOTAL_FIXED_SOMERSLOOP_COST=} {NUM_SOMERSLOOPS_ON_MAP=}"
+
+NUM_SOMERSLOOPS_AVAILABLE = NUM_SOMERSLOOPS_ON_MAP - TOTAL_FIXED_SOMERSLOOP_COST
+
+
+ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER = (
+    ALIEN_POWER_AUGMENTER_STATIC_POWER * NUM_ALIEN_POWER_AUGMENTERS
+)
+ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST = (
+    ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST
+    * (NUM_ALIEN_POWER_AUGMENTERS - NUM_FUELED_ALIEN_POWER_AUGMENTERS)
+) + (ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST * NUM_FUELED_ALIEN_POWER_AUGMENTERS)
+POWER_PRODUCTION_MULTIPLIER = 1.0 + ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST
+TOTAL_ALIEN_POWER_MATRIX_COST = (
+    ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE * NUM_FUELED_ALIEN_POWER_AUGMENTERS
+)
+
+debug_dump(
+    "Somersloops",
+    f"""
+{NUM_SOMERSLOOPS_ON_MAP=}
+{args.disable_production_amplification=}
+{NUM_ALIEN_POWER_AUGMENTERS=}
+{NUM_FUELED_ALIEN_POWER_AUGMENTERS=}
+{TOTAL_FIXED_SOMERSLOOP_COST=}
+{NUM_SOMERSLOOPS_AVAILABLE=}
+{ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER=}
+{ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST=}
+{POWER_PRODUCTION_MULTIPLIER=}
+{TOTAL_ALIEN_POWER_MATRIX_COST=}
+""".strip(),
+)
+
+
+### Additional helpers ###
+
+
+def get_power_consumption(
+    machine: PowerConsumer, clock: Fraction, recipe: Recipe | None = None
+) -> float:
+    power_consumption = machine.power_consumption
+    if recipe is not None and machine.is_variable_power:
+        power_consumption += recipe.mean_variable_power_consumption
+    return power_consumption * (clock**machine.power_consumption_exponent)
+
+
+def get_power_production(generator: PowerGenerator, clock: Fraction) -> float:
+    return generator.power_production * clock
+
+
+def get_miner_for_resource(resource: Resource) -> Miner:
+    item_class = resource.item_class
     item = items[item_class]
-    candidates = []
-    for miner_class, miner in miners.items():
-        if ((resource["is_resource_well"]) == (miner_class == RESOURCE_WELL_PRESSURIZER_CLASS)
-            and item["form"] in miner["allowed_resource_forms"]
-            and (not miner["only_allow_certain_resources"] or item_class in miner["allowed_resources"])):
-            candidates.append(miner_class)
-    if not candidates:
-        raise RuntimeError(f"could not find miner for resource {item_class}")
-    elif len(candidates) > 1:
-        raise RuntimeError(f"more than one miner for resource {item_class}: {candidates}")
+    candidates: list[Miner] = []
+    for miner in miners.values():
+        if (
+            miner.uses_resource_wells == resource.is_resource_well
+            and miner.check_allowed_resource(item_class, item.form)
+        ):
+            candidates.append(miner)
+    assert candidates, f"could not find miner for {item_class}"
+    assert len(candidates) == 1, f"more than one miner for {item_class}: {candidates}"
     return candidates[0]
 
-def get_form_conveyance_limit(form):
+
+def get_form_conveyance_limit(form: str) -> float:
     if form == "RF_SOLID":
         return CONVEYOR_BELT_LIMIT
     elif form == "RF_LIQUID" or form == "RF_GAS":
         return PIPELINE_LIMIT
     else:
-        assert(False)
+        assert False
 
-def get_max_overclock(machine):
-    return machine["max_clock_base"] + MACHINE_POWER_SHARD_LIMIT * machine["max_clock_per_power_shard"]
 
-def get_conveyance_limit_clock(item, rate):
-    conveyance_limit = get_form_conveyance_limit(item["form"])
-    return math.floor(1000000 * conveyance_limit / rate) / 1000000
+def get_conveyance_limit_clock(item: Item, rate: float) -> Fraction:
+    conveyance_limit = get_form_conveyance_limit(item.form)
+    return float_to_clock(conveyance_limit / rate)
 
-def get_max_miner_clock(miner, resource, rate):
-    max_overclock = get_max_overclock(miner)
 
-    if resource["is_resource_well"]:
-        return max_overclock
+def get_max_extraction_clock(
+    miner: Miner, resource: Resource, extraction_rate: float
+) -> Fraction:
+    max_clock = miner.max_clock
 
-    item_class = resource["item"]
-    item = items[item_class]
-    return min(max_overclock, get_conveyance_limit_clock(item, rate))
+    # Assume individual Resource Well Extractors can never exceed conveyance limit
+    if resource.is_resource_well:
+        return max_clock
 
-def get_max_manufacturer_clock(manufacturer, recipe):
-    max_clock = get_max_overclock(manufacturer)
+    item = items[resource.item_class]
+    return min(max_clock, get_conveyance_limit_clock(item, extraction_rate))
 
-    for (item_class, rate) in recipe["inputs"]:
-        max_clock = min(max_clock, get_conveyance_limit_clock(items[item_class], rate))
 
-    for (item_class, rate) in recipe["outputs"]:
-        max_clock = min(max_clock, get_conveyance_limit_clock(items[item_class], rate))
+def get_max_recipe_clock(
+    machine: Machine, recipe: Recipe, output_multiplier: float = 1.0
+) -> Fraction:
+    max_clock = machine.max_clock
+
+    for item_class, input_rate in recipe.inputs:
+        max_clock = min(
+            max_clock,
+            get_conveyance_limit_clock(items[item_class], input_rate),
+        )
+
+    for item_class, output_rate in recipe.outputs:
+        max_clock = min(
+            max_clock,
+            get_conveyance_limit_clock(
+                items[item_class], output_rate * output_multiplier
+            ),
+        )
 
     return max_clock
 
-def get_power_shards_needed(machine, clock):
-    return max(0, math.ceil((clock - machine["max_clock_base"]) / machine["max_clock_per_power_shard"]))
 
-def get_item_display_name(item_class):
+def clamp_clock_choices(
+    configured_clocks: list[Fraction], min_clock: Fraction, max_clock: Fraction
+) -> list[Fraction]:
+    assert min_clock < max_clock
+    return sorted(
+        {min(max_clock, max(min_clock, clock)) for clock in configured_clocks}
+    )
+
+
+# It's convenient to consider generators burning fuel as recipes,
+# even though they are not actually listed as recipes.
+def create_recipe_for_generator(generator: PowerGenerator, fuel: Fuel) -> Recipe:
+    inputs: list[tuple[str, float]] = []
+    outputs: list[tuple[str, float]] = []
+
+    power_production = generator.power_production
+
+    fuel_class = fuel.fuel_class
+    fuel_item = items[fuel_class]
+    fuel_rate = 60.0 * power_production / fuel_item.energy
+    inputs.append((fuel_class, fuel_rate))
+
+    if generator.requires_supplemental:
+        assert fuel.supplemental_resource_class is not None
+        supplemental_class = fuel.supplemental_resource_class
+        supplemental_rate = (
+            60.0 * power_production * generator.supplemental_to_power_ratio
+        )
+        inputs.append((supplemental_class, supplemental_rate))
+
+    if fuel.byproduct is not None:
+        byproduct_class = fuel.byproduct
+        byproduct_rate = fuel_rate * fuel.byproduct_amount
+        outputs.append((byproduct_class, byproduct_rate))
+
+    return Recipe(
+        class_name="",
+        display_name="",
+        manufacturer=generator.class_name,
+        inputs=inputs,
+        outputs=outputs,
+        mean_variable_power_consumption=0.0,
+    )
+
+
+def get_item_display_name(item_class: str) -> str:
     if item_class in items:
-        return items[item_class]["display_name"]
+        return items[item_class].display_name
     else:
         return ADDITIONAL_DISPLAY_NAMES[item_class]
 
-def add_lp_column(column, type_, name, display_name=None, machine_name=None, subtype=None, clock=None):
-    tokens = [type_, name]
-    if subtype is not None:
-        tokens.append(subtype)
-    if clock is not None:
-        clock_percent = 100.0 * clock
-        tokens.append(f"{clock_percent}")
-    column_id = "|".join(tokens)
-    display_info = {
-        "type": type_,
-        "display_name": display_name or name,
-        "machine_name": machine_name,
-        "subtype": subtype,
-        "clock": clock,
-    }
-    lp_columns[column_id] = LPColumn(column, display_info=display_info)
 
-for resource_id, resource in resources.items():
-    item_class = resource["item"]
+### LP setup ###
+
+
+@dataclass
+class LPColumn:
+    coeffs: dict[str, float]
+    type_: str
+    name: str
+    display_name: str
+    full_display_name: str
+    machine_name: str | None
+    resource_subtype: str | None
+    clock: Fraction | None
+    objective_weight: float | None
+    requires_integrality: bool
+
+
+lp_columns: dict[str, LPColumn] = {}
+lp_equalities: dict[str, float] = {}
+lp_lower_bounds: dict[str, float] = {}
+
+
+def create_column_id(
+    type_: str,
+    name: str,
+    clock: Fraction | None = None,
+    somersloops: int | None = None,
+):
+    tokens = [type_, name]
+    if clock is not None:
+        tokens.append(clock_to_percent_str(clock))
+    if somersloops is not None:
+        tokens.append(f"S:{somersloops}")
+    return "|".join(tokens)
+
+
+def create_column_full_display_name(
+    type_: str,
+    display_name: str,
+    machine_name: str | None,
+    resource_subtype: str | None,
+    clock: Fraction | None = None,
+    somersloops: int | None = None,
+):
+    tokens = [machine_name or type_, display_name]
+    if resource_subtype is not None:
+        tokens.append(resource_subtype)
+    if clock is not None:
+        tokens.append(clock_to_percent_str(clock))
+    if somersloops is not None:
+        tokens.append(f"S:{somersloops}")
+    return "|".join(tokens)
+
+
+def add_lp_column(
+    coeffs: dict[str, float],
+    type_: str,
+    name: str,
+    display_name: str | None = None,
+    machine_name: str | None = None,
+    resource_subtype: str | None = None,
+    clock: Fraction | None = None,
+    somersloops: int | None = None,
+    objective_weight: float | None = None,
+    requires_integrality: bool = False,
+):
+    column_id = create_column_id(
+        type_=type_,
+        name=name,
+        clock=clock,
+        somersloops=somersloops,
+    )
+    display_name = display_name or name
+    full_display_name = create_column_full_display_name(
+        type_=type_,
+        display_name=display_name,
+        machine_name=machine_name,
+        resource_subtype=resource_subtype,
+        clock=clock,
+        somersloops=somersloops,
+    )
+    assert column_id not in lp_columns, f"duplicate {column_id=}"
+    lp_columns[column_id] = LPColumn(
+        coeffs=coeffs,
+        type_=type_,
+        name=name,
+        display_name=display_name,
+        full_display_name=full_display_name,
+        machine_name=machine_name,
+        resource_subtype=resource_subtype,
+        clock=clock,
+        objective_weight=objective_weight,
+        requires_integrality=requires_integrality,
+    )
+
+
+def get_recipe_coeffs(
+    recipe: Recipe, clock: Fraction, output_multiplier: float = 1.0
+) -> defaultdict[str, float]:
+    coeffs: defaultdict[str, float] = defaultdict(float)
+
+    for item_class, input_rate in recipe.inputs:
+        item_var = f"item|{item_class}"
+        coeffs[item_var] -= clock * input_rate
+
+    for item_class, output_rate in recipe.outputs:
+        item_var = f"item|{item_class}"
+        coeffs[item_var] += clock * output_rate * output_multiplier
+
+    return coeffs
+
+
+def add_miner_columns(resource: Resource):
+    resource_id = resource.resource_id
+    item_class = resource.item_class
     item = items[item_class]
 
-    miner_class = get_miner_for_resource(resource)
-    miner = miners[miner_class]
+    miner = get_miner_for_resource(resource)
 
-    rate = miner["rate"] * resource["multiplier"]
-    min_clock = miner["min_clock"]
-    max_clock_base = miner["max_clock_base"]
-    max_clock = get_max_miner_clock(miner, resource, rate)
+    extraction_rate = miner.extraction_rate_base * resource.multiplier
+    min_clock = miner.min_clock
+    max_clock = get_max_extraction_clock(miner, resource, extraction_rate)
+    configured_clocks = MANUFACTURER_CLOCKS if resource.is_unlimited else MINER_CLOCKS
+    clock_choices = clamp_clock_choices(configured_clocks, min_clock, max_clock)
 
     resource_var = f"resource|{resource_id}"
     item_var = f"item|{item_class}"
 
-    clock_choices = {max_clock_base, max_clock}
-    for clock in args.extra_miner_clocks:
-        clock = min(max_clock, max(min_clock, clock))
-        clock_choices.add(clock)
-
-    for clock in sorted(clock_choices):
-        column = {
-            item_var: clock * rate,
-            "power_consumption": get_power_consumption(miner, clock=clock),
-            "machines": 1 + (resource["num_satellites"] if resource["is_resource_well"] else 0),
+    for clock in clock_choices:
+        machines = 1 + (resource.num_satellites if resource.is_resource_well else 0)
+        coeffs = {
+            "machines": machines,
+            "power_consumption": get_power_consumption(miner, clock),
+            item_var: clock * extraction_rate,
         }
 
-        if resource["is_limited"]:
-            column[resource_var] = -1
-
-        power_shards = get_power_shards_needed(miner, clock)
-        if power_shards > 0:
-            column["power_shard_usage"] = power_shards
+        if not resource.is_unlimited:
+            coeffs[resource_var] = -1
 
         add_lp_column(
-            column,
+            coeffs,
             type_="miner",
             name=resource_id,
-            display_name=item["display_name"],
-            machine_name=miner["display_name"],
-            subtype=resource["subtype"],
+            display_name=item.display_name,
+            machine_name=miner.display_name,
+            resource_subtype=resource.subtype,
             clock=clock,
         )
 
-    if resource["is_limited"]:
-        lp_lower_bounds[resource_var] = -resource["count"]
+    if not resource.is_unlimited:
+        lp_lower_bounds[resource_var] = -resource.count
 
     lp_equalities[item_var] = 0.0
 
-for recipe_class, recipe in recipes.items():
-    manufacturer_class = recipe["manufacturer"]
+
+for resource in resources.values():
+    add_miner_columns(resource)
+
+
+def add_manufacturer_columns(recipe: Recipe):
+    manufacturer_class = recipe.manufacturer
     manufacturer = manufacturers[manufacturer_class]
 
-    min_clock = manufacturer["min_clock"]
-    max_clock_base = manufacturer["max_clock_base"]
-    max_clock = get_max_manufacturer_clock(manufacturer, recipe)
+    somersloop_choices: list[int | None] = [None]
+    if manufacturer.can_change_production_boost:
+        somersloop_choices.extend(range(1, manufacturer.production_shard_slot_size + 1))
 
-    # let's not allow manufacturer OC by default, but it can be specified via option
-    clock_choices = {min_clock, max_clock_base}
-    for clock in args.extra_manufacturer_clocks:
-        clock = min(max_clock, max(min_clock, clock))
-        clock_choices.add(clock)
+    for somersloops in somersloop_choices:
+        if somersloops is None:
+            output_multiplier = 1.0
+            power_multiplier = 1.0
+            requires_integrality = False
+        else:
+            output_multiplier = (
+                1.0 + somersloops * manufacturer.production_shard_boost_multiplier
+            )
+            power_multiplier = (
+                output_multiplier
+                ** manufacturer.production_boost_power_consumption_exponent
+            )
+            # Fractional machines are generally fine due to clock speeds,
+            # but we should not allow fractional somersloops.
+            requires_integrality = True
 
-    for clock in sorted(clock_choices):
-        column = {
-            "power_consumption": get_power_consumption(manufacturer, clock=clock, recipe=recipe),
-            "machines": 1,
-        }
-
-        for (item_class, rate) in recipe["inputs"]:
-            item_var = f"item|{item_class}"
-            column[item_var] = column.get(item_var, 0.0) - clock * rate
-            lp_equalities[item_var] = 0.0
-
-        for (item_class, rate) in recipe["outputs"]:
-            item_var = f"item|{item_class}"
-            column[item_var] = column.get(item_var, 0.0) + clock * rate
-            lp_equalities[item_var] = 0.0
-
-        power_shards = get_power_shards_needed(manufacturer, clock)
-        if power_shards > 0:
-            column["power_shard_usage"] = power_shards
-
-        add_lp_column(
-            column,
-            type_="manufacturer",
-            name=recipe_class,
-            display_name=recipe["display_name"],
-            machine_name=manufacturer["display_name"],
-            clock=clock,
+        min_clock = manufacturer.min_clock
+        max_clock = get_max_recipe_clock(
+            manufacturer, recipe, output_multiplier=output_multiplier
         )
+        configured_clocks = (
+            MANUFACTURER_CLOCKS if somersloops is None else SOMERSLOOP_CLOCKS
+        )
+        clock_choices = clamp_clock_choices(configured_clocks, min_clock, max_clock)
 
-for item_class, item in items.items():
-    points = item["points"]
+        for clock in clock_choices:
+            power_consumption = (
+                get_power_consumption(manufacturer, clock, recipe) * power_multiplier
+            )
+            coeffs = {
+                "machines": 1,
+                "power_consumption": power_consumption,
+            }
+            if somersloops is not None:
+                coeffs["somersloop_usage"] = somersloops
+
+            recipe_coeffs = get_recipe_coeffs(
+                recipe, clock=clock, output_multiplier=output_multiplier
+            )
+            for item_var, coeff in recipe_coeffs.items():
+                coeffs[item_var] = coeff
+                lp_equalities[item_var] = 0.0
+
+            add_lp_column(
+                coeffs,
+                type_="manufacturer",
+                name=recipe.class_name,
+                display_name=recipe.display_name,
+                machine_name=manufacturer.display_name,
+                clock=clock,
+                somersloops=somersloops,
+                requires_integrality=requires_integrality,
+            )
+
+
+for recipe in recipes.values():
+    add_manufacturer_columns(recipe)
+
+
+def add_sink_column(item: Item):
+    item_class = item.class_name
     item_var = f"item|{item_class}"
+    points = item.points
 
-    if not (item["form"] == "RF_SOLID" and points > 0):
+    if not (item.form == "RF_SOLID" and points > 0):
         if args.allow_waste:
             add_lp_column(
                 {item_var: -1},
                 type_="waste",
                 name=item_class,
-                display_name=item["display_name"],
+                display_name=item.display_name,
             )
-        continue
+        return
 
-    column = {
+    coeffs = {
+        "machines": 1 / CONVEYOR_BELT_LIMIT,
+        "power_consumption": SINK_POWER_CONSUMPTION / CONVEYOR_BELT_LIMIT,
         item_var: -1,
         "points": points,
-        "power_consumption": SINK_POWER_CONSUMPTION / CONVEYOR_BELT_LIMIT,
-        "machines": 1 / CONVEYOR_BELT_LIMIT,
     }
 
     add_lp_column(
-        column,
+        coeffs,
         type_="sink",
         name=item_class,
-        display_name=item["display_name"],
+        display_name=item.display_name,
     )
 
     lp_equalities[item_var] = 0.0
 
-for generator_class, generator in generators.items():
-    power_production = generator["power_production"]
-    for fuel_class in generator["fuel_classes"]:
-        fuel = items[fuel_class]
-        fuel_rate = 60.0 * power_production / fuel["energy"]
-        fuel_var = f"item|{fuel_class}"
 
-        column = {
-            fuel_var: -fuel_rate,
-            "power_production": power_production,
+for item in items.values():
+    add_sink_column(item)
+
+
+def add_generator_columns(generator: PowerGenerator, fuel: Fuel):
+    recipe = create_recipe_for_generator(generator, fuel)
+    fuel_item = items[fuel.fuel_class]
+
+    min_clock = generator.min_clock
+    max_clock = get_max_recipe_clock(generator, recipe)
+    clock_choices = clamp_clock_choices(GENERATOR_CLOCKS, min_clock, max_clock)
+
+    for clock in clock_choices:
+        power_production = (
+            get_power_production(generator, clock=clock) * POWER_PRODUCTION_MULTIPLIER
+        )
+        coeffs = {
             "machines": 1,
+            "power_production": power_production,
         }
 
-        if generator["requires_supplemental"]:
-            supplemental_class = WATER_CLASS
-            supplemental_var = f"item|{supplemental_class}"
-            supplemental_rate = 60.0 * power_production * generator["supplemental_to_power_ratio"]
-            column[supplemental_var] = -supplemental_rate
-            lp_equalities[supplemental_var] = 0.0
-
-        if fuel_class in NUCLEAR_WASTE_MAPPINGS:
-            waste_class = NUCLEAR_WASTE_MAPPINGS[fuel_class]
-            waste_var = f"item|{waste_class}"
-            column[waste_var] = fuel_rate * fuel["nuclear_waste_amount"]
-            lp_equalities[waste_var] = 0.0
+        recipe_coeffs = get_recipe_coeffs(recipe, clock=clock)
+        for item_var, coeff in recipe_coeffs.items():
+            coeffs[item_var] = coeff
+            lp_equalities[item_var] = 0.0
 
         add_lp_column(
-            column,
+            coeffs,
             type_="generator",
-            name=fuel_class,
-            display_name=fuel["display_name"],
-            machine_name=generator["display_name"],
-            clock=1,
+            name=fuel_item.class_name,
+            display_name=fuel_item.display_name,
+            machine_name=generator.display_name,
+            clock=clock,
         )
 
-for resource_id, resource in geysers.items():
+
+for generator in generators.values():
+    for fuel in generator.fuels:
+        add_generator_columns(generator, fuel)
+
+
+def add_geothermal_generator_columns(resource: Resource):
+    resource_id = resource.resource_id
     resource_var = f"resource|{resource_id}"
 
-    column = {
-        resource_var: -1,
-        "power_production": geothermal_generator["power_production"] * resource["multiplier"],
+    power_production = (
+        geothermal_generator.mean_variable_power_production
+        * resource.multiplier
+        * POWER_PRODUCTION_MULTIPLIER
+    )
+    coeffs = {
         "machines": 1,
+        "power_production": power_production,
+        resource_var: -1,
     }
 
     add_lp_column(
-        column,
+        coeffs,
         type_="generator",
         name=resource_id,
         display_name=get_item_display_name(GEYSER_CLASS),
-        machine_name=geothermal_generator["display_name"],
-        subtype=resource["subtype"],
+        machine_name=geothermal_generator.display_name,
+        resource_subtype=resource.subtype,
+        requires_integrality=True,
     )
 
-    lp_lower_bounds[resource_var] = -resource["count"]
+    lp_lower_bounds[resource_var] = -resource.count
 
-for column_id, column in lp_columns.items():
-    to_add = defaultdict(float)
-    for variable, coeff in column.items():
-        if abs(coeff) < EPSILON:
-            print(f"WARNING: zero or near-zero coeff: column_id={column_id} variable={variable} coeff={coeff}")
 
+for resource in geysers.values():
+    add_geothermal_generator_columns(resource)
+
+
+def add_meta_coeffs(column_id: str, column: LPColumn):
+    to_add: defaultdict[str, float] = defaultdict(float)
+    for variable, coeff in column.coeffs.items():
         if variable.startswith("item|") and coeff > 0:
             item_class = variable[5:]
             if item_class not in items:
@@ -725,11 +1408,14 @@ for column_id, column in lp_columns.items():
                 continue
 
             item = items[item_class]
-            form = item["form"]
+            form = item.form
             conveyance_limit = get_form_conveyance_limit(form)
             conveyance = coeff / conveyance_limit
 
-            if column_id.startswith("miner|"):
+            # Avoid incurring transport costs for Water Extractors,
+            # as they would otherwise dominate the cost.
+            # Basically we're assuming other stuff is brought to the water.
+            if column.type_ == "miner" and column.resource_subtype != "extractor":
                 to_add["transport_power_cost"] += args.transport_power_cost * conveyance
                 to_add["drone_battery_cost"] += args.drone_battery_cost * conveyance
 
@@ -740,68 +1426,101 @@ for column_id, column in lp_columns.items():
 
     for variable, coeff in to_add.items():
         if coeff != 0.0:
-            column[variable] = column.get(variable, 0.0) + coeff
+            column.coeffs[variable] = column.coeffs.get(variable, 0.0) + coeff
 
-for objective in ["points", "machines", "conveyors", "pipelines"]:
-    column = {
-        objective: -1,
+
+for column_id, column in lp_columns.items():
+    add_meta_coeffs(column_id, column)
+
+
+def add_objective_column(objective: str, objective_weight: float):
+    coeffs = {
+        objective: -1.0,
     }
     add_lp_column(
-        column,
+        coeffs,
         type_="objective",
         name=objective,
+        objective_weight=objective_weight,
     )
     lp_equalities[objective] = 0.0
 
+
+add_objective_column("points", 1.0)
+add_objective_column("machines", -args.machine_penalty)
+add_objective_column("conveyors", -args.conveyor_penalty)
+add_objective_column("pipelines", -args.pipeline_penalty)
+
+
+# These columns cancel dummy variables introduced for ease of reporting.
+# Instead of deducting X directly, we accumulate a cost variable, then pay it here.
+# Breakdowns of cost contributors/payers then appear naturally in the report.
+
+# Power usage
+coeffs = {
+    "power_consumption": -1.0,
+    "power_production": -1.0,
+}
+add_lp_column(
+    coeffs,
+    type_="power",
+    name="usage",
+)
+lp_equalities["power_consumption"] = 0.0
+lp_lower_bounds["power_production"] = -ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER
+
+# Alien Power Matrix fuel
+if TOTAL_ALIEN_POWER_MATRIX_COST > 0.0:
+    coeffs = {
+        "alien_power_matrix_cost": -1.0,
+        f"item|{ALIEN_POWER_MATRIX_CLASS}": -1.0,
+    }
+    add_lp_column(
+        coeffs,
+        type_="alien_power_matrix",
+        name="fuel",
+    )
+    lp_equalities["alien_power_matrix_cost"] = -TOTAL_ALIEN_POWER_MATRIX_COST
+
+# Configured extra costs
 for extra_cost, cost_variable, cost_coeff in [
     ("transport_power_cost", "power_consumption", 1.0),
     ("drone_battery_cost", f"item|{BATTERY_CLASS}", -1.0),
 ]:
-    column = {
-        extra_cost: -1,
+    coeffs = {
+        extra_cost: -1.0,
         cost_variable: cost_coeff,
     }
     add_lp_column(
-        column,
+        coeffs,
         type_="extra_cost",
         name=extra_cost,
     )
     lp_equalities[extra_cost] = 0.0
 
-column = {
-    "power_consumption": -1,
-    "power_production": -1,
+# Somersloop usage
+coeffs = {
+    "somersloop_usage": -1.0,
+    "somersloops": -1.0,
 }
 add_lp_column(
-    column,
-    type_="power",
+    coeffs,
+    type_="somersloop",
     name="usage",
 )
-lp_equalities["power_consumption"] = 0.0
-lp_lower_bounds["power_production"] = 0.0
+lp_equalities["somersloop_usage"] = 0.0
+lp_lower_bounds["somersloops"] = -NUM_SOMERSLOOPS_AVAILABLE
 
-column = {
-    "power_shard_usage": -1,
-    "power_shards": -1,
-}
-add_lp_column(
-    column,
-    type_="objective",
-    name="power_shards",
-)
-lp_equalities["power_shard_usage"] = 0.0
-lp_lower_bounds["power_shards"] = -TOTAL_POWER_SHARDS
-
-# pprint(lp_columns)
-# pprint(lp_equalities)
-# pprint(lp_lower_bounds)
+# debug_dump("LP columns (before pruning)", lp_columns)
+# debug_dump("LP equalities (before pruning)", lp_equalities)
+# debug_dump("LP lower bounds (before pruning)", lp_lower_bounds)
 
 
-def get_all_variables():
-    variables = set()
+def get_all_variables() -> set[str]:
+    variables: set[str] = set()
 
-    for column_id, column in lp_columns.items():
-        for variable, coeff in column.items():
+    for column in lp_columns.values():
+        for variable in column.coeffs.keys():
             variables.add(variable)
 
     for variable in variables:
@@ -818,19 +1537,21 @@ def get_all_variables():
 
     return variables
 
-variables = get_all_variables()
-# pprint(variables)
+
+lp_variables = get_all_variables()
+
+# debug_dump("LP variables (before pruning)", lp_variables)
 
 
 ### Pruning ###
 
-reachable_items = set()
+reachable_items: set[str] = set()
 while True:
     any_added = False
     for column_id, column in lp_columns.items():
         eligible = True
-        to_add = set()
-        for variable, coeff in column.items():
+        to_add: set[str] = set()
+        for variable, coeff in column.coeffs.items():
             if variable.startswith("item|") and variable not in reachable_items:
                 if coeff > 0:
                     to_add.add(variable)
@@ -843,260 +1564,327 @@ while True:
     if not any_added:
         break
 
-unreachable_items = set(v for v in variables if v.startswith("item|")) - reachable_items
+unreachable_items = (
+    set(v for v in lp_variables if v.startswith("item|")) - reachable_items
+)
 
-print("pruning unreachable items:")
-pprint(unreachable_items)
+debug_dump("Unreachable items to be pruned", unreachable_items)
 
-columns_to_prune = list()
+columns_to_prune: list[str] = []
 for column_id, column in lp_columns.items():
-    for variable, coeff in column.items():
+    for variable, coeff in column.coeffs.items():
         if variable in unreachable_items and coeff < 0:
             columns_to_prune.append(column_id)
             break
 for column_id in columns_to_prune:
-    # pprint(lp_columns[column_id])
     del lp_columns[column_id]
 for item_var in unreachable_items:
     if item_var in lp_equalities:
         del lp_equalities[item_var]
 
-variables = get_all_variables()
-# pprint(variables)
 
-# pprint(lp_columns)
-# pprint(lp_equalities)
-# pprint(lp_lower_bounds)
+debug_dump("LP columns (after pruning)", lp_columns)
+debug_dump("LP equalities (after pruning)", lp_equalities)
+debug_dump("LP lower bounds (after pruning)", lp_lower_bounds)
+
+lp_variables = get_all_variables()
+
+debug_dump("LP variables (after pruning)", lp_variables)
 
 
 ### LP run ###
 
-def to_index_map(seq):
+
+def to_index_map(seq: Iterable[T]) -> dict[T, int]:
     return {value: index for index, value in enumerate(seq)}
 
-def from_index_map(d):
-    result = [None] * len(d)
+
+def from_index_map(d: dict[T, int]) -> list[T]:
+    result: list[T | None] = [None] * len(d)
     for value, index in d.items():
         result[index] = value
-    return result
+    assert all(value is not None for value in result)
+    return cast(list[T], result)
+
 
 # order is for report display, but we might as well sort it here
-column_type_order = to_index_map(["objective", "power", "extra_cost", "sink", "waste", "manufacturer", "miner", "generator"])
-column_subtype_order = to_index_map(["impure", "normal", "pure"])
-objective_order = to_index_map(["points", "machines", "conveyors", "pipelines", "power_shards"])
+column_type_order = to_index_map(
+    [
+        "objective",
+        "power",
+        "extra_cost",
+        "sink",
+        "waste",
+        "somersloops",
+        "manufacturer",
+        "miner",
+        "generator",
+    ]
+)
+resource_subtype_order = to_index_map(["pure", "normal", "impure"])
+objective_order = to_index_map(["points", "machines", "conveyors", "pipelines"])
 extra_cost_order = to_index_map(["transport_power_cost", "drone_battery_cost"])
 
-def column_order_key(arg):
+
+def column_order_key(arg: tuple[str, LPColumn]):
     column_id, column = arg
-    info = column.display_info
 
-    type_ = info["type"]
-    if type_ in column_type_order:
-        type_key = (0, column_type_order[type_])
+    if column.type_ in column_type_order:
+        type_key = (0, column_type_order[column.type_])
     else:
-        type_key = (1, type_)
+        type_key = (1, column.type_)
 
-    name = info["display_name"]
-    if type_ == "objective":
+    name = column.display_name
+    if column.type_ == "objective":
         name_key = objective_order[name]
-    elif type_ == "extra_cost":
+    elif column.type_ == "extra_cost":
         name_key = extra_cost_order[name]
     else:
         name_key = name
 
-    subtype = info["subtype"]
-    if subtype in column_subtype_order:
-        subtype_key = (0, column_subtype_order[subtype])
+    resource_subtype = column.resource_subtype
+    if resource_subtype in resource_subtype_order:
+        subtype_key = (0, resource_subtype_order[resource_subtype])
     else:
-        subtype_key = (1, subtype)
+        subtype_key = (1, resource_subtype)
 
-    return (type_key, name_key, subtype_key, info["clock"], column_id)
+    return (type_key, name_key, subtype_key, column.clock, column_id)
+
 
 sorted_columns = sorted(lp_columns.items(), key=column_order_key)
-indices_eq = to_index_map(sorted(lp_equalities.keys()))
-indices_lb = to_index_map(sorted(lp_lower_bounds.keys()))
-
-# pprint(indices_eq)
-# pprint(indices_lb)
+lp_variable_indices = to_index_map(lp_variables)
 
 lp_c = np.zeros(len(lp_columns), dtype=np.double)
-lp_A_eq = np.zeros((len(lp_equalities), len(lp_columns)), dtype=np.double)
-lp_b_eq = np.zeros(len(lp_equalities), dtype=np.double)
-lp_A_lb = np.zeros((len(lp_lower_bounds), len(lp_columns)), dtype=np.double)
-lp_b_lb = np.zeros(len(lp_lower_bounds), dtype=np.double)
-
-objective_weights = {f"objective|{obj}": weight for (obj, weight) in {
-    "points": 1,
-    "machines": -args.machine_penalty,
-    "conveyors": -args.conveyor_penalty,
-    "pipelines": -args.pipeline_penalty,
-    "power_shards": -args.power_shard_penalty_ratio * args.machine_penalty,
-}.items()}
+lp_integrality = np.zeros(len(lp_columns), dtype=np.int64)
+lp_A = np.zeros((len(lp_variables), len(lp_columns)), dtype=np.double)
+lp_b_l = np.zeros(len(lp_variables), dtype=np.double)
+lp_b_u = np.zeros(len(lp_variables), dtype=np.double)
 
 for column_index, (column_id, column) in enumerate(sorted_columns):
-    if column_id in objective_weights:
-        lp_c[column_index] = objective_weights[column_id]
-    for variable, coeff in column.items():
-        if variable in lp_equalities:
-            lp_A_eq[indices_eq[variable], column_index] = coeff
-        else:
-            lp_A_lb[indices_lb[variable], column_index] = coeff
+    if column.objective_weight is not None:
+        lp_c[column_index] = column.objective_weight
+    if column.requires_integrality:
+        lp_integrality[column_index] = 1
+    for variable, coeff in column.coeffs.items():
+        lp_A[lp_variable_indices[variable], column_index] = coeff
 
 for variable, rhs in lp_equalities.items():
-    lp_b_eq[indices_eq[variable]] = rhs
+    lp_b_l[lp_variable_indices[variable]] = rhs
+    lp_b_u[lp_variable_indices[variable]] = rhs
 
 for variable, rhs in lp_lower_bounds.items():
-    lp_b_lb[indices_lb[variable]] = rhs
+    lp_b_l[lp_variable_indices[variable]] = rhs
 
-print("running LP")
+lp_constraints = scipy.optimize.LinearConstraint(lp_A, lp_b_l, lp_b_u)  # type: ignore
 
-lp_result = scipy.optimize.linprog(-lp_c, A_ub=-lp_A_lb, b_ub=-lp_b_lb, A_eq=lp_A_eq, b_eq=lp_b_eq, method="highs")
+print("LP running")
+
+lp_result = scipy.optimize.milp(
+    -lp_c,
+    integrality=lp_integrality,
+    constraints=lp_constraints,
+)
 
 if lp_result.status != 0:
     print("ERROR: LP did not terminate successfully")
     pprint(lp_result)
     sys.exit(1)
 
+print("LP result:")
 pprint(lp_result)
 
 
 ### Display formatting ###
 
-def format_subtype(subtype):
-    if subtype is None or subtype == "extractor":
-        return None
-    return re.sub(r"^BP_FrackingCore_?", "#", subtype).capitalize()
+REPORT_EPSILON = 1e-7
 
-def get_column_desc(column):
-    info = column.display_info
-    tokens = [info["machine_name"] or info["type"], info["display_name"]]
-    subtype = format_subtype(info["subtype"])
-    if subtype is not None:
-        tokens.append(subtype)
-    if info["clock"] is not None:
-        clock_percent = 100.0 * info["clock"]
-        tokens.append(f"{clock_percent}%")
-    return "|".join(tokens)
-
-column_results = [
+column_results: list[tuple[str, LPColumn, float]] = [
     (column_id, column, lp_result.x[column_index])
     for column_index, (column_id, column) in enumerate(sorted_columns)
 ]
 
 if not args.show_unused:
-    column_results = list(filter(lambda x: abs(x[2]) > EPSILON, column_results))
+    column_results = list(filter(lambda x: abs(x[2]) > REPORT_EPSILON, column_results))
 
-variable_breakdowns = {variable: {"production": [], "consumption": []} for variable in variables}
 
-for column_id, column, column_coeff in column_results:
-    column_desc = get_column_desc(column)
+@dataclass
+class BudgetEntry:
+    desc: str
+    count: float
+    rate: float
+    share: float
 
-    print(f"{column_desc} = {column_coeff}")
 
-    for variable, coeff in column.items():
-        rate = column_coeff * coeff
-        source = {
-            "desc": column_desc,
-            "count": column_coeff,
-            "rate": abs(rate),
-        }
-        if abs(rate) < EPSILON:
-            continue
-        elif rate > 0:
-            variable_breakdowns[variable]["production"].append(source)
-        else:
-            variable_breakdowns[variable]["consumption"].append(source)
+@dataclass
+class VariableBreakdown:
+    type_: str
+    display_name: str
+    sort_key: Any
+    production: list[BudgetEntry]
+    consumption: list[BudgetEntry]
+    initial: float | None
+    final: float | None
 
-variable_order = to_index_map(
+
+variable_type_order = to_index_map(
     from_index_map(objective_order)
     + ["power_production", "power_consumption"]
+    + ["alien_power_matrix_cost"]
     + from_index_map(extra_cost_order)
-    + ["power_shards", "power_shard_usage", "item", "resource"]
+    + ["somersloops", "somersloop_usage"]
+    + ["item", "resource"]
 )
 
-def get_variable_display_info(variable):
+
+def create_empty_variable_breakdown(variable: str) -> VariableBreakdown:
     tokens = variable.split("|")
     type_ = tokens[0]
     if type_ == "item" or type_ == "resource":
         item_class = tokens[1]
         tokens[1] = get_item_display_name(item_class)
-    return (type_, "|".join(tokens))
+    display_name = "|".join(tokens)
+    sort_key = [variable_type_order[type_], display_name, 0]
+    if type_ == "resource":
+        sort_key[1] = tokens[1]
+        sort_key[2] = resource_subtype_order.get(tokens[2], 0)
+    return VariableBreakdown(
+        type_=type_,
+        display_name=display_name,
+        sort_key=sort_key,
+        production=[],
+        consumption=[],
+        initial=None,
+        final=None,
+    )
 
-def finalize_variable_budget_side(budget_side):
+
+variable_breakdowns = {
+    variable: create_empty_variable_breakdown(variable) for variable in lp_variables
+}
+
+print("")
+print("Summary:")
+
+for column_id, column, column_coeff in column_results:
+    print(f"{column_coeff:>17.3f} {column.full_display_name}")
+
+    for variable, coeff in column.coeffs.items():
+        rate = column_coeff * coeff
+        budget_entry = BudgetEntry(
+            desc=column.full_display_name,
+            count=column_coeff,
+            rate=abs(rate),
+            share=0.0,
+        )
+        if abs(rate) < REPORT_EPSILON:
+            continue
+        elif rate > 0:
+            variable_breakdowns[variable].production.append(budget_entry)
+        else:
+            variable_breakdowns[variable].consumption.append(budget_entry)
+
+print("")
+
+
+def finalize_variable_budget_side(budget_side: list[BudgetEntry]):
     if not budget_side:
         return
     total_rate = 0.0
-    for entry in budget_side:
-        total_rate += entry["rate"]
-    for entry in budget_side:
-        entry["share"] = entry["rate"] / total_rate
-    budget_side.sort(key=lambda entry: (-entry["share"], entry["desc"]))
-    budget_side.insert(0, {"desc": "Total", "count": "n/a", "rate": total_rate, "share": 1.0})
+    total_count = 0.0
+    for budget_entry in budget_side:
+        total_rate += budget_entry.rate
+        total_count += budget_entry.count
+    for budget_entry in budget_side:
+        budget_entry.share = budget_entry.rate / total_rate
+    budget_side.sort(key=lambda entry: (-entry.share, entry.desc))
+    total = BudgetEntry(desc="Total", count=total_count, rate=total_rate, share=1.0)
+    budget_side.insert(0, total)
+
+
+lp_Ax = lp_A @ lp_result.x
 
 for variable, breakdown in variable_breakdowns.items():
-    type_, name = get_variable_display_info(variable)
-
     # don't show offsetting dummy items in the breakdown (e.g. "objective|points" as consumer of points)
     # currently these are precisely the consumption of special variables, but that may change
-    if type_ not in ["item", "resource"]:
-        breakdown["consumption"] = []
+    if breakdown.type_ not in ["item", "resource"]:
+        breakdown.consumption = []
 
-    breakdown["type_order"] = variable_order[type_]
-    breakdown["name"] = name
-    if variable in indices_lb:
-        slack = lp_result.slack[indices_lb[variable]]
-        if slack < -EPSILON:
-            print(f"WARNING: lower bound violation: variable={variable} slack={slack}")
-        breakdown["initial"] = -lp_lower_bounds[variable]
-        breakdown["final"] = slack
+    variable_index = lp_variable_indices[variable]
+    if variable in lp_lower_bounds:
+        slack: float = lp_Ax[variable_index] - lp_b_l[variable_index]
+        if slack < -REPORT_EPSILON:
+            print(f"WARNING: lower bound violation: {variable=} {slack=}")
+        breakdown.initial = -lp_lower_bounds[variable]
+        breakdown.final = slack
     else:
-        con = lp_result.con[indices_eq[variable]]
-        if abs(con) > EPSILON:
-            print(f"WARNING: equality constraint violation: variable={variable} con={con}")
-    finalize_variable_budget_side(breakdown["production"])
-    finalize_variable_budget_side(breakdown["consumption"])
+        residual: float = lp_Ax[variable_index] - lp_b_l[variable_index]
+        if abs(residual) > REPORT_EPSILON:
+            print(f"WARNING: equality constraint violation: {variable=} {residual=}")
+    finalize_variable_budget_side(breakdown.production)
+    finalize_variable_budget_side(breakdown.consumption)
 
-sorted_variable_breakdowns = sorted(variable_breakdowns.values(), key=lambda bd: (bd["type_order"], bd["name"]))
-
-# pprint(sorted_variable_breakdowns)
+sorted_variable_breakdowns = sorted(
+    variable_breakdowns.values(), key=lambda bd: bd.sort_key
+)
 
 if args.xlsx_report:
-    print("writing xlsx report")
+    print("Writing xlsx report")
 
     import xlsxwriter
+
     workbook = xlsxwriter.Workbook(args.xlsx_report)
 
     default_format = workbook.add_format({"align": "center"})
     top_format = workbook.add_format({"align": "center", "top": True})
     bold_format = workbook.add_format({"align": "center", "bold": True})
-    bold_underline_format = workbook.add_format({"align": "center", "bold": True, "underline": True})
-    bold_top_format = workbook.add_format({"align": "center", "bold": True, "top": True})
-    bold_underline_top_format = workbook.add_format({"align": "center", "bold": True, "underline": True, "top": True})
+    bold_underline_format = workbook.add_format(
+        {"align": "center", "bold": True, "underline": True}
+    )
+    bold_top_format = workbook.add_format(
+        {"align": "center", "bold": True, "top": True}
+    )
+    bold_underline_top_format = workbook.add_format(
+        {"align": "center", "bold": True, "underline": True, "top": True}
+    )
     percent_format = workbook.add_format({"align": "center", "num_format": "0.0#####%"})
 
-    sheet1 = workbook.add_worksheet("List" + args.xlsx_sheet_suffix)
-    sheet2 = workbook.add_worksheet("Breakdown" + args.xlsx_sheet_suffix)
+    sheet1 = workbook.add_worksheet("Breakdown" + args.xlsx_sheet_suffix)
+    sheet2 = workbook.add_worksheet("List" + args.xlsx_sheet_suffix)
 
     def write_cell(sheet, *args, fmt=default_format):
         sheet.write(*args, fmt)
 
-    sheet1.add_table(0, 0, len(column_results), 5, {
-        "columns": [{"header": header, "header_format": bold_format}
-        for header in ["Type", "Name", "Machine", "Subtype", "Clock", "Quantity"]],
-        "style": "Table Style Light 16",
-    })
+    sheet2.add_table(
+        0,
+        0,
+        len(column_results),
+        5,
+        {
+            "columns": [
+                {"header": header, "header_format": bold_format}
+                for header in [
+                    "Type",
+                    "Name",
+                    "Machine",
+                    "Subtype",
+                    "Clock",
+                    "Quantity",
+                ]
+            ],
+            "style": "Table Style Light 16",
+        },
+    )
 
     for i, (column_id, column, column_coeff) in enumerate(column_results):
-        info = column.display_info
-        write_cell(sheet1, i + 1, 0, info["type"])
-        write_cell(sheet1, i + 1, 1, info["display_name"])
-        write_cell(sheet1, i + 1, 2, info["machine_name"] or "n/a")
-        write_cell(sheet1, i + 1, 3, info["subtype"] or "n/a")
-        write_cell(sheet1, i + 1, 4, info["clock"] or "n/a", fmt=percent_format)
-        write_cell(sheet1, i + 1, 5, column_coeff)
+        write_cell(sheet2, i + 1, 0, column.type_)
+        write_cell(sheet2, i + 1, 1, column.display_name)
+        write_cell(sheet2, i + 1, 2, column.machine_name or "n/a")
+        write_cell(sheet2, i + 1, 3, column.resource_subtype or "n/a")
+        write_cell(sheet2, i + 1, 4, column.clock or "n/a", fmt=percent_format)
+        write_cell(sheet2, i + 1, 5, column_coeff)
 
-    for c, width in enumerate([14, 39, 25, 19, 11, 13]):
-        sheet1.set_column(c, c, width)
+    for c, width in enumerate([19, 39, 25, 19, 11, 13]):
+        sheet2.set_column(c, c, width)
 
     current_row = 0
     max_budget_entries = 0
@@ -1114,14 +1902,16 @@ if args.xlsx_report:
         "min_value": 0,
         "max_value": 1,
         "min_color": "#FFFFFF",
-        "max_color": "#99FF99"
+        "max_color": "#99FF99",
     }
     consumption_share_cf = production_share_cf.copy()
     consumption_share_cf["max_color"] = "#FFCC66"
 
     for variable_index, breakdown in enumerate(sorted_variable_breakdowns):
-        for budget_side_index, budget_side_name in enumerate(["production", "consumption"]):
-            budget_side = breakdown[budget_side_name]
+        for budget_side_index, budget_side_name, budget_side in (
+            (0, "production", breakdown.production),
+            (1, "consumption", breakdown.consumption),
+        ):
             if not budget_side:
                 continue
             for budget_row in budget_rows:
@@ -1133,28 +1923,41 @@ if args.xlsx_report:
                     fmts = (bold_format, percent_format)
                 else:
                     fmts = (bold_format, default_format)
-                write_cell(sheet2, current_row, 0, breakdown["name"], fmt=fmts[0])
-                write_cell(sheet2, current_row, 1, name, fmt=fmts[0])
+                write_cell(sheet1, current_row, 0, breakdown.display_name, fmt=fmts[0])
+                write_cell(sheet1, current_row, 1, name, fmt=fmts[0])
                 for i, entry in enumerate(budget_side):
-                    write_cell(sheet2, current_row, i + 2, entry[key], fmt=fmts[1])
+                    value = getattr(entry, key)
+                    write_cell(sheet1, current_row, i + 2, value, fmt=fmts[1])
                 if key == "share":
-                    cf = production_share_cf if budget_side_name == "production" else consumption_share_cf
-                    sheet2.conditional_format(current_row, 3, current_row, len(budget_side) + 1, cf)
+                    cf = (
+                        production_share_cf
+                        if budget_side_name == "production"
+                        else consumption_share_cf
+                    )
+                    sheet1.conditional_format(
+                        current_row, 3, current_row, len(budget_side) + 1, cf
+                    )
                 max_budget_entries = max(max_budget_entries, len(budget_side))
                 current_row += 1
-        for key in ["initial", "final"]:
-            if key in breakdown:
-                if key == "initial":
-                    fmts = (bold_top_format, top_format)
-                else:
-                    fmts = (bold_format, default_format)
-                fmt = bold_top_format if key == "initial" else bold_format
-                write_cell(sheet2, current_row, 0, breakdown["name"], fmt=fmts[0])
-                write_cell(sheet2, current_row, 1, key.capitalize(), fmt=fmts[0])
-                write_cell(sheet2, current_row, 2, breakdown[key], fmt=fmts[1])
-                current_row += 1
+
+        for initial_or_final, initial_or_final_value in (
+            ("initial", breakdown.initial),
+            ("final", breakdown.final),
+        ):
+            if initial_or_final_value is None:
+                continue
+            if initial_or_final == "initial":
+                fmts = (bold_top_format, top_format)
+            else:
+                fmts = (bold_format, default_format)
+            write_cell(sheet1, current_row, 0, breakdown.display_name, fmt=fmts[0])
+            write_cell(
+                sheet1, current_row, 1, initial_or_final.capitalize(), fmt=fmts[0]
+            )
+            write_cell(sheet1, current_row, 2, initial_or_final_value, fmt=fmts[1])
+            current_row += 1
 
     for c, width in enumerate([41, 19, 13] + [59] * (max_budget_entries - 1)):
-        sheet2.set_column(c, c, width)
+        sheet1.set_column(c, c, width)
 
     workbook.close()

@@ -1,11 +1,26 @@
 # SatisfactoryLP
-Satisfactory linear programming optimization, using `scipy.optimize.linprog`. Most data is parsed from the `Docs.json` provided by Coffee Stain Studios in the Satisfactory game directory. Also uses `MapInfo.json` taken from [Satisfactory Calculator](https://satisfactory-calculator.com/) for resource node information.
 
-[Baseline results on Google Sheets](https://docs.google.com/spreadsheets/d/1q4dvdzhLXdbDdV1lxKM27TFOuI2TariiiItFIuygWEw/edit?usp=sharing) (might not be regularly updated).
+Satisfactory linear programming optimization, using `scipy.optimize.milp`.
+
+Recipes are parsed from data provided by Coffee Stain Studios in the Satisfactory game directory.
+
+Map data for resource node availability is taken from [Satisfactory Calculator](https://satisfactory-calculator.com/). I don't know how to obtain it directly.
+
+Data sources, retrieved 2024-11-03:
+- `Docs.json`: `Satisfactory\CommunityResources\Docs\en-US.json` (v1.0.0.4 - Build 372858)
+- `MapInfo.json`: `https://static.satisfactory-calculator.com/data/json/mapData/en-Stable.json?v=1730198931` (plus auto-formatting)
+
+[Baseline results on Google Sheets](https://docs.google.com/spreadsheets/d/1Vkklgd37jbtgURB6zjLq7--5rMnRe5FfQ9EoWpQuh40/edit?usp=sharing), generated 2024-11-03.
 
 # Requirements
-- Python 3.8+
+- Python 3.12 (older versions may work)
 - `pip install scipy xlsxwriter`
 
 # Running
 Running `python SatisfactoryLP.py` produces some text output and a `Results.xlsx` file which can be opened in Excel or imported to Google Sheets. There are various options to control extra costs and penalty weights; use `-h` to see details.
+
+The most important options are:
+- `--machine-penalty` controls the tradeoff between underclocking and machine count. Increasing this penalty causes the optimizer to prefer higher clock speeds and fewer machines. On the other hand, decreasing it to zero would cause most machines to be set to the lowest possible clock speed.
+- `--manufacturer-clocks` specifies the allowed clock speeds for non-somerslooped manufacturers and Water Extractors. Increasing the granularity allows the optimizer to reach higher objectives at the cost of increased problem size and running time. All clock speed options can be specified as a comma-separated list, where each token is either a single clock speed or a triple `lower-upper/step`. The default setting is `--manufacturer-clocks=0-1/0.25,1.5-2.5/0.5` which translates to [0%, 25%, 50%, 75%, 100%, 150%, 200%, 250%]. Note that 0% will automatically be forced up to the minumum clock speed of 1%, and higher clock speeds will automatically be forced down if they would exceed a conveyor belt limit for the recipe.
+
+TODO: document more options.
