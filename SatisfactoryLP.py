@@ -57,7 +57,7 @@ parser.add_argument(
 parser.add_argument(
     "--manufacturer-clocks",
     type=str,
-    default="0-1/0.25,1.5-2.5/0.5",
+    default="0-2.5/0.05",
     help="clock choices for non-somerslooped manufacturers (plus Water Extractors)",
 )
 parser.add_argument(
@@ -1129,6 +1129,7 @@ class LPColumn:
     machine_name: str | None
     resource_subtype: str | None
     clock: Fraction | None
+    somersloops: int | None
     objective_weight: float | None
     requires_integrality: bool
 
@@ -1207,6 +1208,7 @@ def add_lp_column(
         machine_name=machine_name,
         resource_subtype=resource_subtype,
         clock=clock,
+        somersloops=somersloops,
         objective_weight=objective_weight,
         requires_integrality=requires_integrality,
     )
@@ -1920,7 +1922,7 @@ if args.xlsx_report:
         0,
         0,
         len(column_results),
-        5,
+        6,
         {
             "columns": [
                 {"header": header, "header_format": bold_format}
@@ -1930,6 +1932,7 @@ if args.xlsx_report:
                     "Machine",
                     "Subtype",
                     "Clock",
+                    "Somersloops",
                     "Quantity",
                 ]
             ],
@@ -1943,9 +1946,10 @@ if args.xlsx_report:
         write_cell(sheet_list, i + 1, 2, column.machine_name or "n/a")
         write_cell(sheet_list, i + 1, 3, column.resource_subtype or "n/a")
         write_cell(sheet_list, i + 1, 4, column.clock or "n/a", fmt=percent_format)
-        write_cell(sheet_list, i + 1, 5, column_coeff)
+        write_cell(sheet_list, i + 1, 5, column.somersloops or "n/a")
+        write_cell(sheet_list, i + 1, 6, column_coeff)
 
-    for c, width in enumerate([19, 39, 25, 19, 11, 13]):
+    for c, width in enumerate([19, 39, 25, 19, 11, 17, 13]):
         sheet_list.set_column(c, c, width)
 
     current_row = 0
