@@ -90,6 +90,17 @@ parser.add_argument(
     help="disable usage of somersloops in manufacturers",
 )
 parser.add_argument(
+    "--resource-multipliers",
+    type=str,
+    default="",
+    help="comma-separated list of item_class:multiplier to scale resource node availability",
+)
+parser.add_argument(
+    "--infinite-power",
+    action="store_true",
+    help="allow free infinite power consumption",
+)
+parser.add_argument(
     "--allow-waste",
     action="store_true",
     help="allow accumulation of nuclear waste and other unsinkable items",
@@ -115,7 +126,9 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+
 ### Constants ###
+
 
 # Common
 
@@ -218,6 +231,7 @@ ADDITIONAL_DISPLAY_NAMES = {
 
 ### Debug ###
 
+
 DEBUG_INFO_PATH = r"DebugInfo.txt"
 PPRINT_WIDTH = 120
 
@@ -276,7 +290,32 @@ debug_dump(
 """.strip(),
 )
 
+
+### Configured resource multipliers ###
+
+
+def parse_resource_multipliers(s: str) -> dict[str, float]:
+    result: dict[str, float] = {}
+    if s:
+        for token in s.split(","):
+            item_class, _, multiplier = token.partition(":")
+            assert item_class not in result
+            result[item_class] = float(multiplier)
+    return result
+
+
+RESOURCE_MULTIPLIERS = parse_resource_multipliers(args.resource_multipliers)
+
+debug_dump(
+    "Configured resource multipliers",
+    f"""
+{RESOURCE_MULTIPLIERS=}
+""".strip(),
+)
+
+
 ### Load json ###
+
 
 DOCS_PATH = r"Docs.json"
 MAP_INFO_PATH = r"MapInfo.json"
@@ -287,6 +326,7 @@ with open(DOCS_PATH, "r", encoding="utf-16") as f:
 
 
 ### Initial parsing ###
+
 
 class_name_to_entry: dict[str, dict[str, Any]] = {}
 native_class_to_class_entries: dict[str, list[dict[str, Any]]] = {}
@@ -330,17 +370,12 @@ def parse_paren_list(s: str) -> list[str] | None:
 
 QUALIFIED_CLASS_NAME_REGEX = re.compile(r"\"?/Script/[^']+'/[\w\-/]+\.(\w+)'\"?")
 UNQUALIIFIED_CLASS_NAME_REGEX = re.compile(r"\"?/[\w\-/]+\.(\w+)\"?")
-PERSISTENT_LEVEL_CLASS_NAME_REGEX = re.compile(
-    r"Persistent_Level:PersistentLevel\.(\w+)"
-)
 
 
 def extract_class_name(s: str) -> str:
-    m = (
-        QUALIFIED_CLASS_NAME_REGEX.fullmatch(s)
-        or UNQUALIIFIED_CLASS_NAME_REGEX.fullmatch(s)
-        or PERSISTENT_LEVEL_CLASS_NAME_REGEX.fullmatch(s)
-    )
+    m = QUALIFIED_CLASS_NAME_REGEX.fullmatch(
+        s
+    ) or UNQUALIIFIED_CLASS_NAME_REGEX.fullmatch(s)
     assert m is not None, s
     return m.group(1)
 
@@ -361,6 +396,7 @@ def find_item_amounts(s: str) -> Iterable[tuple[str, int]]:
 
 
 ### Misc constants ###
+
 
 CONVEYOR_BELT_LIMIT = 0.5 * float(class_name_to_entry[CONVEYOR_BELT_CLASS]["mSpeed"])
 PIPELINE_LIMIT = 60000.0 * float(class_name_to_entry[PIPELINE_CLASS]["mFlowLimit"])
@@ -400,6 +436,7 @@ debug_dump(
 {ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE=}
 """.strip(),
 )
+
 
 ### Classes ###
 
@@ -773,6 +810,19 @@ resources: dict[str, Resource] = {}
 geysers: dict[str, Resource] = {}
 
 
+# Persistent_Level:PersistentLevel.BP_FrackingCore6_UAID_40B076DF2F79D3DF01_1961476789
+# becomes #6. We can strip out the UAID as long as it's unique for each item type.
+FRACKING_CORE_REGEX = re.compile(
+    r"Persistent_Level:PersistentLevel\.BP_FrackingCore_?(\d+)(_UAID_\w+)?"
+)
+
+
+def parse_fracking_core_name(s: str) -> str:
+    m = FRACKING_CORE_REGEX.fullmatch(s)
+    assert m is not None, s
+    return "#" + m.group(1)
+
+
 def parse_and_add_resources(map_resource: dict[str, Any]):
     if "type" not in map_resource:
         return
@@ -796,7 +846,7 @@ def parse_and_add_resources(map_resource: dict[str, Any]):
         if "core" in sample_node:
             # resource well satellite nodes, map to cores and sum the purity multipliers
             for node in nodes:
-                subtype = extract_class_name(node["core"])  # specific FrackingCore
+                subtype = parse_fracking_core_name(node["core"])
                 resource_id = f"{item_class}|{subtype}"
                 if resource_id not in output:
                     output[resource_id] = Resource(
@@ -1216,7 +1266,8 @@ def add_miner_columns(resource: Resource):
         )
 
     if not resource.is_unlimited:
-        lp_lower_bounds[resource_var] = -resource.count
+        resource_multiplier = RESOURCE_MULTIPLIERS.get(resource.item_class, 1.0)
+        lp_lower_bounds[resource_var] = -resource.count * resource_multiplier
 
     lp_equalities[item_var] = 0.0
 
@@ -1391,7 +1442,8 @@ def add_geothermal_generator_columns(resource: Resource):
         requires_integrality=True,
     )
 
-    lp_lower_bounds[resource_var] = -resource.count
+    resource_multiplier = RESOURCE_MULTIPLIERS.get(resource.item_class, 1.0)
+    lp_lower_bounds[resource_var] = -resource.count * resource_multiplier
 
 
 for resource in geysers.values():
@@ -1468,6 +1520,8 @@ add_lp_column(
 )
 lp_equalities["power_consumption"] = 0.0
 lp_lower_bounds["power_production"] = -ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER
+if args.infinite_power:
+    lp_lower_bounds["power_production"] = -np.inf
 
 # Alien Power Matrix fuel
 if TOTAL_ALIEN_POWER_MATRIX_COST > 0.0:
@@ -1501,7 +1555,7 @@ for extra_cost, cost_variable, cost_coeff in [
 # Somersloop usage
 coeffs = {
     "somersloop_usage": -1.0,
-    "somersloops": -1.0,
+    "somersloop": -1.0,
 }
 add_lp_column(
     coeffs,
@@ -1509,7 +1563,9 @@ add_lp_column(
     name="usage",
 )
 lp_equalities["somersloop_usage"] = 0.0
-lp_lower_bounds["somersloops"] = -NUM_SOMERSLOOPS_AVAILABLE
+lp_lower_bounds["somersloop"] = -NUM_SOMERSLOOPS_AVAILABLE * RESOURCE_MULTIPLIERS.get(
+    "somersloop", 1.0
+)
 
 # debug_dump("LP columns (before pruning)", lp_columns)
 # debug_dump("LP equalities (before pruning)", lp_equalities)
@@ -1543,7 +1599,8 @@ lp_variables = get_all_variables()
 # debug_dump("LP variables (before pruning)", lp_variables)
 
 
-### Pruning ###
+### Pruning unreachable items ###
+
 
 reachable_items: set[str] = set()
 while True:
@@ -1615,7 +1672,7 @@ column_type_order = to_index_map(
         "extra_cost",
         "sink",
         "waste",
-        "somersloops",
+        "somersloop",
         "manufacturer",
         "miner",
         "generator",
@@ -1696,6 +1753,7 @@ pprint(lp_result)
 
 ### Display formatting ###
 
+
 REPORT_EPSILON = 1e-7
 
 column_results: list[tuple[str, LPColumn, float]] = [
@@ -1731,7 +1789,7 @@ variable_type_order = to_index_map(
     + ["power_production", "power_consumption"]
     + ["alien_power_matrix_cost"]
     + from_index_map(extra_cost_order)
-    + ["somersloops", "somersloop_usage"]
+    + ["somersloop", "somersloop_usage"]
     + ["item", "resource"]
 )
 
@@ -1743,10 +1801,13 @@ def create_empty_variable_breakdown(variable: str) -> VariableBreakdown:
         item_class = tokens[1]
         tokens[1] = get_item_display_name(item_class)
     display_name = "|".join(tokens)
-    sort_key = [variable_type_order[type_], display_name, 0]
+    sort_key: list[Any] = [variable_type_order[type_]]
     if type_ == "resource":
-        sort_key[1] = tokens[1]
-        sort_key[2] = resource_subtype_order.get(tokens[2], 0)
+        sort_key.append(tokens[1])
+        sort_key.append(resource_subtype_order.get(tokens[2], np.inf))
+        sort_key.append(tokens[2])
+    else:
+        sort_key.append(display_name)
     return VariableBreakdown(
         type_=type_,
         display_name=display_name,
@@ -1815,7 +1876,7 @@ for variable, breakdown in variable_breakdowns.items():
         if slack < -REPORT_EPSILON:
             print(f"WARNING: lower bound violation: {variable=} {slack=}")
         breakdown.initial = -lp_lower_bounds[variable]
-        breakdown.final = slack
+        breakdown.final = slack if abs(slack) > REPORT_EPSILON else 0
     else:
         residual: float = lp_Ax[variable_index] - lp_b_l[variable_index]
         if abs(residual) > REPORT_EPSILON:
@@ -1832,7 +1893,7 @@ if args.xlsx_report:
 
     import xlsxwriter
 
-    workbook = xlsxwriter.Workbook(args.xlsx_report)
+    workbook = xlsxwriter.Workbook(args.xlsx_report, {"nan_inf_to_errors": True})
 
     default_format = workbook.add_format({"align": "center"})
     top_format = workbook.add_format({"align": "center", "top": True})
@@ -1848,13 +1909,14 @@ if args.xlsx_report:
     )
     percent_format = workbook.add_format({"align": "center", "num_format": "0.0#####%"})
 
-    sheet1 = workbook.add_worksheet("Breakdown" + args.xlsx_sheet_suffix)
-    sheet2 = workbook.add_worksheet("List" + args.xlsx_sheet_suffix)
+    sheet_breakdown = workbook.add_worksheet("Breakdown" + args.xlsx_sheet_suffix)
+    sheet_list = workbook.add_worksheet("List" + args.xlsx_sheet_suffix)
+    sheet_config = workbook.add_worksheet("Config" + args.xlsx_sheet_suffix)
 
     def write_cell(sheet, *args, fmt=default_format):
         sheet.write(*args, fmt)
 
-    sheet2.add_table(
+    sheet_list.add_table(
         0,
         0,
         len(column_results),
@@ -1876,15 +1938,15 @@ if args.xlsx_report:
     )
 
     for i, (column_id, column, column_coeff) in enumerate(column_results):
-        write_cell(sheet2, i + 1, 0, column.type_)
-        write_cell(sheet2, i + 1, 1, column.display_name)
-        write_cell(sheet2, i + 1, 2, column.machine_name or "n/a")
-        write_cell(sheet2, i + 1, 3, column.resource_subtype or "n/a")
-        write_cell(sheet2, i + 1, 4, column.clock or "n/a", fmt=percent_format)
-        write_cell(sheet2, i + 1, 5, column_coeff)
+        write_cell(sheet_list, i + 1, 0, column.type_)
+        write_cell(sheet_list, i + 1, 1, column.display_name)
+        write_cell(sheet_list, i + 1, 2, column.machine_name or "n/a")
+        write_cell(sheet_list, i + 1, 3, column.resource_subtype or "n/a")
+        write_cell(sheet_list, i + 1, 4, column.clock or "n/a", fmt=percent_format)
+        write_cell(sheet_list, i + 1, 5, column_coeff)
 
     for c, width in enumerate([19, 39, 25, 19, 11, 13]):
-        sheet2.set_column(c, c, width)
+        sheet_list.set_column(c, c, width)
 
     current_row = 0
     max_budget_entries = 0
@@ -1923,18 +1985,20 @@ if args.xlsx_report:
                     fmts = (bold_format, percent_format)
                 else:
                     fmts = (bold_format, default_format)
-                write_cell(sheet1, current_row, 0, breakdown.display_name, fmt=fmts[0])
-                write_cell(sheet1, current_row, 1, name, fmt=fmts[0])
+                write_cell(
+                    sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0]
+                )
+                write_cell(sheet_breakdown, current_row, 1, name, fmt=fmts[0])
                 for i, entry in enumerate(budget_side):
                     value = getattr(entry, key)
-                    write_cell(sheet1, current_row, i + 2, value, fmt=fmts[1])
+                    write_cell(sheet_breakdown, current_row, i + 2, value, fmt=fmts[1])
                 if key == "share":
                     cf = (
                         production_share_cf
                         if budget_side_name == "production"
                         else consumption_share_cf
                     )
-                    sheet1.conditional_format(
+                    sheet_breakdown.conditional_format(
                         current_row, 3, current_row, len(budget_side) + 1, cf
                     )
                 max_budget_entries = max(max_budget_entries, len(budget_side))
@@ -1950,14 +2014,29 @@ if args.xlsx_report:
                 fmts = (bold_top_format, top_format)
             else:
                 fmts = (bold_format, default_format)
-            write_cell(sheet1, current_row, 0, breakdown.display_name, fmt=fmts[0])
             write_cell(
-                sheet1, current_row, 1, initial_or_final.capitalize(), fmt=fmts[0]
+                sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0]
             )
-            write_cell(sheet1, current_row, 2, initial_or_final_value, fmt=fmts[1])
+            write_cell(
+                sheet_breakdown,
+                current_row,
+                1,
+                initial_or_final.capitalize(),
+                fmt=fmts[0],
+            )
+            write_cell(
+                sheet_breakdown, current_row, 2, initial_or_final_value, fmt=fmts[1]
+            )
             current_row += 1
 
     for c, width in enumerate([41, 19, 13] + [59] * (max_budget_entries - 1)):
-        sheet1.set_column(c, c, width)
+        sheet_breakdown.set_column(c, c, width)
+
+    for i, (arg_name, arg_value) in enumerate(vars(args).items()):
+        write_cell(sheet_config, i, 0, arg_name)
+        write_cell(sheet_config, i, 1, arg_value)
+
+    for c, width in enumerate([36, 19]):
+        sheet_config.set_column(c, c, width)
 
     workbook.close()
