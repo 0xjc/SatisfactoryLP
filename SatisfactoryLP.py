@@ -1825,8 +1825,12 @@ variable_breakdowns = {
     variable: create_empty_variable_breakdown(variable) for variable in lp_variables
 }
 
+lp_objective: float = -lp_result.fun
+
 print("")
 print("Summary:")
+
+print(f"{lp_objective:>17.3f} objective")
 
 for column_id, column, column_coeff in column_results:
     print(f"{column_coeff:>17.3f} {column.full_display_name}")
@@ -1940,14 +1944,18 @@ if args.xlsx_report:
         },
     )
 
+    write_cell(sheet_list, 1, 0, "objective")
+    write_cell(sheet_list, 1, 1, "objective")
+    write_cell(sheet_list, 1, 6, lp_objective)
+
     for i, (column_id, column, column_coeff) in enumerate(column_results):
-        write_cell(sheet_list, i + 1, 0, column.type_)
-        write_cell(sheet_list, i + 1, 1, column.display_name)
-        write_cell(sheet_list, i + 1, 2, column.machine_name or "n/a")
-        write_cell(sheet_list, i + 1, 3, column.resource_subtype or "n/a")
-        write_cell(sheet_list, i + 1, 4, column.clock or "n/a", fmt=percent_format)
-        write_cell(sheet_list, i + 1, 5, column.somersloops or "n/a")
-        write_cell(sheet_list, i + 1, 6, column_coeff)
+        write_cell(sheet_list, 2 + i, 0, column.type_)
+        write_cell(sheet_list, 2 + i, 1, column.display_name)
+        write_cell(sheet_list, 2 + i, 2, column.machine_name)
+        write_cell(sheet_list, 2 + i, 3, column.resource_subtype)
+        write_cell(sheet_list, 2 + i, 4, column.clock, fmt=percent_format)
+        write_cell(sheet_list, 2 + i, 5, column.somersloops)
+        write_cell(sheet_list, 2 + i, 6, column_coeff)
 
     for c, width in enumerate([19, 39, 25, 19, 11, 17, 13]):
         sheet_list.set_column(c, c, width)
@@ -1995,7 +2003,7 @@ if args.xlsx_report:
                 write_cell(sheet_breakdown, current_row, 1, name, fmt=fmts[0])
                 for i, entry in enumerate(budget_side):
                     value = getattr(entry, key)
-                    write_cell(sheet_breakdown, current_row, i + 2, value, fmt=fmts[1])
+                    write_cell(sheet_breakdown, current_row, 2 + i, value, fmt=fmts[1])
                 if key == "share":
                     cf = (
                         production_share_cf
