@@ -96,6 +96,12 @@ parser.add_argument(
     help="comma-separated list of item_class:multiplier to scale resource node availability",
 )
 parser.add_argument(
+    "--disabled-recipes",
+    type=str,
+    default="",
+    help="comma-separated list of recipe_class to disable",
+)
+parser.add_argument(
     "--infinite-power",
     action="store_true",
     help="allow free infinite power consumption",
@@ -116,7 +122,10 @@ parser.add_argument(
     help="dump debug info to DebugInfo.txt (items, recipes, LP matrix, etc.)",
 )
 parser.add_argument(
-    "--xlsx-report", type=str, default="Report.xlsx", help="path to xlsx report output"
+    "--xlsx-report",
+    type=str,
+    default="Report.xlsx",
+    help="path to xlsx report output (empty string to disable)",
 )
 parser.add_argument(
     "--xlsx-sheet-suffix",
@@ -310,6 +319,20 @@ debug_dump(
     "Configured resource multipliers",
     f"""
 {RESOURCE_MULTIPLIERS=}
+""".strip(),
+)
+
+
+### Configured disabled recipes ###
+
+DISABLED_RECIPES: list[str] = [
+    token.strip() for token in args.disabled_recipes.split(",")
+]
+
+debug_dump(
+    "Configured disabled recipes",
+    f"""
+{DISABLED_RECIPES=}
 """.strip(),
 )
 
@@ -1343,7 +1366,8 @@ def add_manufacturer_columns(recipe: Recipe):
 
 
 for recipe in recipes.values():
-    add_manufacturer_columns(recipe)
+    if recipe.class_name not in DISABLED_RECIPES:
+        add_manufacturer_columns(recipe)
 
 
 def add_sink_column(item: Item):
