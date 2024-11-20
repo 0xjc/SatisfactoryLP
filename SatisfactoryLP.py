@@ -37,6 +37,11 @@ parser.add_argument(
     help="objective penalty per pipeline of machine input/output",
 )
 parser.add_argument(
+    "--machine-limit",
+    type=float,
+    help="hard limit on number of machines built",
+)
+parser.add_argument(
     "--transport-power-cost",
     type=float,
     default=0.0,
@@ -94,6 +99,11 @@ parser.add_argument(
     type=str,
     default="",
     help="comma-separated list of item_class:multiplier to scale resource node availability",
+)
+parser.add_argument(
+    "--num-somersloops-available",
+    type=int,
+    help="override number of somersloops available for production and APAs",
 )
 parser.add_argument(
     "--disabled-recipes",
@@ -944,61 +954,68 @@ def parse_num_somersloops_on_map(somersloops_map_layer: dict[str, Any]) -> int:
     return count
 
 
-NUM_SOMERSLOOPS_ON_MAP = parse_num_somersloops_on_map(
-    find_somersloops_map_layer(map_info["artifacts"])
-)
-
 PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST = 1
 ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST = 1
 ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST = 10
 
-NUM_ALIEN_POWER_AUGMENTERS: int = args.num_alien_power_augmenters
-NUM_FUELED_ALIEN_POWER_AUGMENTERS: float = args.num_fueled_alien_power_augmenters
 
-assert NUM_FUELED_ALIEN_POWER_AUGMENTERS <= NUM_ALIEN_POWER_AUGMENTERS
+def get_num_somersloops_available() -> int:
+    if args.num_somersloops_available is not None:
+        return args.num_somersloops_available
 
-TOTAL_FIXED_SOMERSLOOP_COST = (
-    (
+    num_somersloops_on_map = parse_num_somersloops_on_map(
+        find_somersloops_map_layer(map_info["artifacts"])
+    )
+    research_somersloop_cost = (
         PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST
         if not args.disable_production_amplification
         else 0
-    )
-    + (
+    ) + (
         ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST
-        if NUM_ALIEN_POWER_AUGMENTERS > 0
+        if args.num_alien_power_augmenters > 0
         else 0
     )
-    + (ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST * NUM_ALIEN_POWER_AUGMENTERS)
+    assert research_somersloop_cost <= num_somersloops_on_map
+    return num_somersloops_on_map - research_somersloop_cost
+
+
+NUM_SOMERSLOOPS_AVAILABLE = get_num_somersloops_available()
+POWER_SOMERSLOOP_COST: int = (
+    ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST * args.num_alien_power_augmenters
 )
 
 assert (
-    TOTAL_FIXED_SOMERSLOOP_COST <= NUM_SOMERSLOOPS_ON_MAP
-), f"{TOTAL_FIXED_SOMERSLOOP_COST=} {NUM_SOMERSLOOPS_ON_MAP=}"
+    POWER_SOMERSLOOP_COST <= NUM_SOMERSLOOPS_AVAILABLE
+), f"{POWER_SOMERSLOOP_COST=} {NUM_SOMERSLOOPS_AVAILABLE=}"
 
-NUM_SOMERSLOOPS_AVAILABLE = NUM_SOMERSLOOPS_ON_MAP - TOTAL_FIXED_SOMERSLOOP_COST
-
-
-ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER = (
-    ALIEN_POWER_AUGMENTER_STATIC_POWER * NUM_ALIEN_POWER_AUGMENTERS
+NUM_SOMERSLOOPS_AVAILABLE_FOR_PRODUCTION = (
+    NUM_SOMERSLOOPS_AVAILABLE - POWER_SOMERSLOOP_COST
 )
-ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST = (
+
+assert args.num_fueled_alien_power_augmenters <= args.num_alien_power_augmenters
+
+ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER: float = (
+    ALIEN_POWER_AUGMENTER_STATIC_POWER * args.num_alien_power_augmenters
+)
+ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST: float = (
     ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST
-    * (NUM_ALIEN_POWER_AUGMENTERS - NUM_FUELED_ALIEN_POWER_AUGMENTERS)
-) + (ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST * NUM_FUELED_ALIEN_POWER_AUGMENTERS)
+    * (args.num_alien_power_augmenters - args.num_fueled_alien_power_augmenters)
+) + (
+    ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST * args.num_fueled_alien_power_augmenters
+)
 POWER_PRODUCTION_MULTIPLIER = 1.0 + ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST
-TOTAL_ALIEN_POWER_MATRIX_COST = (
-    ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE * NUM_FUELED_ALIEN_POWER_AUGMENTERS
+TOTAL_ALIEN_POWER_MATRIX_COST: float = (
+    ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE * args.num_fueled_alien_power_augmenters
 )
 
 debug_dump(
     "Somersloops",
     f"""
-{NUM_SOMERSLOOPS_ON_MAP=}
 {args.disable_production_amplification=}
-{NUM_ALIEN_POWER_AUGMENTERS=}
-{NUM_FUELED_ALIEN_POWER_AUGMENTERS=}
-{TOTAL_FIXED_SOMERSLOOP_COST=}
+{args.num_alien_power_augmenters=}
+{args.num_fueled_alien_power_augmenters=}
 {NUM_SOMERSLOOPS_AVAILABLE=}
+{NUM_SOMERSLOOPS_AVAILABLE_FOR_PRODUCTION=}
 {ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER=}
 {ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST=}
 {POWER_PRODUCTION_MULTIPLIER=}
@@ -1511,10 +1528,29 @@ for column_id, column in lp_columns.items():
     add_meta_coeffs(column_id, column)
 
 
-def add_objective_column(objective: str, objective_weight: float):
+@dataclass
+class HardLimit:
+    name: str
+    weight: float
+    lower_bound: float
+
+
+machine_limit = (
+    HardLimit(name="machine_limit", weight=-1.0, lower_bound=-args.machine_limit)
+    if args.machine_limit is not None
+    else None
+)
+
+
+def add_objective_column(
+    objective: str, objective_weight: float, hard_limit: HardLimit | None = None
+):
     coeffs = {
         objective: -1.0,
     }
+    if hard_limit is not None:
+        coeffs[hard_limit.name] = hard_limit.weight
+        lp_lower_bounds[hard_limit.name] = hard_limit.lower_bound
     add_lp_column(
         coeffs,
         type_="objective",
@@ -1525,7 +1561,7 @@ def add_objective_column(objective: str, objective_weight: float):
 
 
 add_objective_column("points", 1.0)
-add_objective_column("machines", -args.machine_penalty)
+add_objective_column("machines", -args.machine_penalty, machine_limit)
 add_objective_column("conveyors", -args.conveyor_penalty)
 add_objective_column("pipelines", -args.pipeline_penalty)
 
@@ -1589,9 +1625,7 @@ add_lp_column(
     name="usage",
 )
 lp_equalities["somersloop_usage"] = 0.0
-lp_lower_bounds["somersloop"] = -NUM_SOMERSLOOPS_AVAILABLE * RESOURCE_MULTIPLIERS.get(
-    "somersloop", 1.0
-)
+lp_lower_bounds["somersloop"] = -NUM_SOMERSLOOPS_AVAILABLE_FOR_PRODUCTION
 
 # debug_dump("LP columns (before pruning)", lp_columns)
 # debug_dump("LP equalities (before pruning)", lp_equalities)
@@ -1705,7 +1739,9 @@ column_type_order = to_index_map(
     ]
 )
 resource_subtype_order = to_index_map(["pure", "normal", "impure"])
-objective_order = to_index_map(["points", "machines", "conveyors", "pipelines"])
+objective_order = to_index_map(
+    ["points", "machines", "machine_limit", "conveyors", "pipelines"]
+)
 extra_cost_order = to_index_map(["transport_power_cost", "drone_battery_cost"])
 
 

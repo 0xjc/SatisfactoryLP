@@ -1,3 +1,5 @@
 .venv
 *.xlsx
 DebugInfo.txt
+Output.txt
+reports/
