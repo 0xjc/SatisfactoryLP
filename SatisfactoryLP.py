@@ -1793,6 +1793,7 @@ for variable, rhs in lp_equalities.items():
 
 for variable, rhs in lp_lower_bounds.items():
     lp_b_l[lp_variable_indices[variable]] = rhs
+    lp_b_u[lp_variable_indices[variable]] = np.inf
 
 lp_constraints = scipy.optimize.LinearConstraint(lp_A, lp_b_l, lp_b_u)  # type: ignore
 
