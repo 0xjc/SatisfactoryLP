@@ -6,11 +6,13 @@ Recipes are parsed from data provided by Coffee Stain Studios in the Satisfactor
 
 Map data for resource node availability is taken from [Satisfactory Calculator](https://satisfactory-calculator.com/). I don't know how to obtain it directly.
 
-Data sources, retrieved 2024-11-04:
-- `Docs.json`: `Satisfactory\CommunityResources\Docs\en-US.json` (v1.0.0.5 - Build 377620)
-- `MapInfo.json`: `https://static.satisfactory-calculator.com/data/json/mapData/en-Stable.json?v=1730198931` (plus auto-formatting)
+Data sources, retrieved 2026-07-17:
+- `Docs.json`: `Satisfactory\CommunityResources\Docs\en-US.json` (v1.2.3.1 - Build 495413)
+- `MapInfo.json`: `https://static.satisfactory-calculator.com/data/json/mapData/en-Stable.json?v=1784184789` (plus auto-formatting; lastBuild 492064)
 
 [Baseline results on Google Sheets](https://docs.google.com/spreadsheets/d/1Vkklgd37jbtgURB6zjLq7--5rMnRe5FfQ9EoWpQuh40/edit?usp=sharing), generated 2024-11-04.
+
+Note: compared to the 2024 data, the default objective improved slightly (467,533,013.450 → 467,536,230.426, +0.0007%) because the base power consumption of the Particle Accelerator, Quantum Encoder, and Converter was reduced from 0.1 MW to 0 MW. Recipes and resource node availability are unchanged.
 
 # Requirements
 - Python 3.12 (older versions may work)

@@ -237,6 +237,12 @@ PURITY_MULTIPLIERS = {
     "normal": 1.0,
     "pure": 2.0,
 }
+# Newer map data uses in-game enum names for purity ("Inpure" is the game's typo)
+PURITY_ALIASES = {
+    "RP_Inpure": "impure",
+    "RP_Normal": "normal",
+    "RP_Pure": "pure",
+}
 RESOURCE_MAPPINGS = {
     "Desc_LiquidOilWell_C": "Desc_LiquidOil_C",
 }
@@ -414,10 +420,10 @@ def extract_class_name(s: str) -> str:
 
 
 def parse_class_list(s: str) -> list[str] | None:
-    l = parse_paren_list(s)
-    if l is None:
+    tokens = parse_paren_list(s)
+    if tokens is None:
         return None
-    return [extract_class_name(x) for x in l]
+    return [extract_class_name(token) for token in tokens]
 
 
 ITEM_AMOUNT_REGEX = re.compile(r"\(ItemClass=([^,]+),Amount=(\d+)\)")
@@ -729,7 +735,8 @@ def parse_item(entry: dict[str, Any]) -> Item:
         class_name=entry["ClassName"],
         display_name=entry["mDisplayName"],
         form=entry["mForm"],
-        points=int(entry["mResourceSinkPoints"]),
+        # missing for some FICSMAS items, e.g. Desc_XmasDataCartridge1_C
+        points=int(entry.get("mResourceSinkPoints", 0)),
         stack_size=STACK_SIZES[entry["mStackSize"]],
         energy=float(entry["mEnergyValue"]),
     )
@@ -871,10 +878,12 @@ def parse_and_add_resources(map_resource: dict[str, Any]):
         assert item_class in items, f"map has unknown resource: {item_class}"
 
     for node_purity in map_resource["options"]:
-        purity = node_purity["purity"]
+        # empty layers may lack a purity field, e.g. geyserUnknown
         nodes = node_purity["markers"]
         if not nodes:
             continue
+        purity = node_purity["purity"]
+        purity = PURITY_ALIASES.get(purity, purity)
         sample_node = nodes[0]
         if "core" in sample_node:
             # resource well satellite nodes, map to cores and sum the purity multipliers
@@ -1033,11 +1042,11 @@ def get_power_consumption(
     power_consumption = machine.power_consumption
     if recipe is not None and machine.is_variable_power:
         power_consumption += recipe.mean_variable_power_consumption
-    return power_consumption * (clock**machine.power_consumption_exponent)
+    return power_consumption * (float(clock) ** machine.power_consumption_exponent)
 
 
 def get_power_production(generator: PowerGenerator, clock: Fraction) -> float:
-    return generator.power_production * clock
+    return generator.power_production * float(clock)
 
 
 def get_miner_for_resource(resource: Resource) -> Miner:
@@ -1291,7 +1300,7 @@ def add_miner_columns(resource: Resource):
         coeffs = {
             "machines": machines,
             "power_consumption": get_power_consumption(miner, clock),
-            item_var: clock * extraction_rate,
+            item_var: float(clock) * extraction_rate,
         }
 
         if not resource.is_unlimited:
@@ -1493,7 +1502,7 @@ for resource in geysers.values():
     add_geothermal_generator_columns(resource)
 
 
-def add_meta_coeffs(column_id: str, column: LPColumn):
+def add_meta_coeffs(column: LPColumn):
     to_add: defaultdict[str, float] = defaultdict(float)
     for variable, coeff in column.coeffs.items():
         if variable.startswith("item|") and coeff > 0:
@@ -1524,8 +1533,8 @@ def add_meta_coeffs(column_id: str, column: LPColumn):
             column.coeffs[variable] = column.coeffs.get(variable, 0.0) + coeff
 
 
-for column_id, column in lp_columns.items():
-    add_meta_coeffs(column_id, column)
+for column in lp_columns.values():
+    add_meta_coeffs(column)
 
 
 @dataclass
@@ -1795,7 +1804,7 @@ for variable, rhs in lp_lower_bounds.items():
     lp_b_l[lp_variable_indices[variable]] = rhs
     lp_b_u[lp_variable_indices[variable]] = np.inf
 
-lp_constraints = scipy.optimize.LinearConstraint(lp_A, lp_b_l, lp_b_u)  # type: ignore
+lp_constraints = scipy.optimize.LinearConstraint(lp_A, lp_b_l, lp_b_u)
 
 print("LP running")
 
