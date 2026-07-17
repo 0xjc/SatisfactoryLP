@@ -260,9 +260,7 @@ ADDITIONAL_DISPLAY_NAMES = {
 DEBUG_INFO_PATH = r"DebugInfo.txt"
 PPRINT_WIDTH = 120
 
-debug_file = (
-    open(DEBUG_INFO_PATH, mode="w", encoding="utf-8") if args.dump_debug_info else None
-)
+debug_file = open(DEBUG_INFO_PATH, mode="w", encoding="utf-8") if args.dump_debug_info else None
 
 
 def debug_dump(heading: str, obj: object):
@@ -341,9 +339,7 @@ debug_dump(
 
 ### Configured disabled recipes ###
 
-DISABLED_RECIPES: list[str] = [
-    token.strip() for token in args.disabled_recipes.split(",")
-]
+DISABLED_RECIPES: list[str] = [token.strip() for token in args.disabled_recipes.split(",")]
 
 debug_dump(
     "Configured disabled recipes",
@@ -412,9 +408,7 @@ UNQUALIIFIED_CLASS_NAME_REGEX = re.compile(r"\"?/[\w\-/]+\.(\w+)\"?")
 
 
 def extract_class_name(s: str) -> str:
-    m = QUALIFIED_CLASS_NAME_REGEX.fullmatch(
-        s
-    ) or UNQUALIIFIED_CLASS_NAME_REGEX.fullmatch(s)
+    m = QUALIFIED_CLASS_NAME_REGEX.fullmatch(s) or UNQUALIIFIED_CLASS_NAME_REGEX.fullmatch(s)
     assert m is not None, s
     return m.group(1)
 
@@ -451,19 +445,14 @@ debug_dump(
 )
 
 
-ALIEN_POWER_AUGMENTER_STATIC_POWER = float(
-    class_name_to_entry[ALIEN_POWER_AUGMENTER_CLASS]["mBasePowerProduction"]
-)
+ALIEN_POWER_AUGMENTER_STATIC_POWER = float(class_name_to_entry[ALIEN_POWER_AUGMENTER_CLASS]["mBasePowerProduction"])
 ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST = float(
     class_name_to_entry[ALIEN_POWER_AUGMENTER_CLASS]["mBaseBoostPercentage"]
 )
-ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST = (
-    ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST
-    + float(class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostPercentage"])
+ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST = ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST + float(
+    class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostPercentage"]
 )
-ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE = 60.0 / float(
-    class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostDuration"]
-)
+ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE = 60.0 / float(class_name_to_entry[ALIEN_POWER_MATRIX_CLASS]["mBoostDuration"])
 
 
 debug_dump(
@@ -584,11 +573,7 @@ def parse_miner(entry: dict[str, Any]) -> Miner:
 
     # This will be multiplied by the purity when applied to a node
     # (or, for resource wells, the sum of satellite purities).
-    extraction_rate_base = (
-        60.0
-        / float(extractor["mExtractCycleTime"])
-        * float(extractor["mItemsPerCycle"])
-    )
+    extraction_rate_base = 60.0 / float(extractor["mExtractCycleTime"]) * float(extractor["mItemsPerCycle"])
 
     allowed_resource_forms = parse_paren_list(extractor["mAllowedResourceForms"])
     assert allowed_resource_forms is not None
@@ -604,9 +589,7 @@ def parse_miner(entry: dict[str, Any]) -> Miner:
         extraction_rate_base=extraction_rate_base,
         uses_resource_wells=uses_resource_wells,
         allowed_resource_forms=allowed_resource_forms,
-        only_allow_certain_resources=(
-            extractor["mOnlyAllowCertainResources"] == "True"
-        ),
+        only_allow_certain_resources=(extractor["mOnlyAllowCertainResources"] == "True"),
         allowed_resources=parse_class_list(extractor["mAllowedResources"]),
     )
 
@@ -648,12 +631,8 @@ def parse_manufacturer(entry: dict[str, Any], is_variable_power: bool) -> Manufa
         can_change_production_boost=(entry["mCanChangeProductionBoost"] == "True"),
         base_production_boost=float(entry["mBaseProductionBoost"]),
         production_shard_slot_size=production_shard_slot_size,
-        production_shard_boost_multiplier=float(
-            entry["mProductionShardBoostMultiplier"]
-        ),
-        production_boost_power_consumption_exponent=float(
-            entry["mProductionBoostPowerConsumptionExponent"]
-        ),
+        production_shard_boost_multiplier=float(entry["mProductionShardBoostMultiplier"]),
+        production_boost_power_consumption_exponent=float(entry["mProductionBoostPowerConsumptionExponent"]),
     )
 
 
@@ -689,16 +668,13 @@ def parse_recipe(entry: dict[str, Any]) -> Recipe | None:
             or "BP_WorkshopComponent_C" in produced_in
             or "BP_BuildGun_C" in produced_in
             or "FGBuildGun" in produced_in
-        ), f"{entry["mDisplayName"]} {produced_in}"
+        ), f"{entry['mDisplayName']} {produced_in}"
         return None
 
     recipe_rate = 60.0 / float(entry["mManufactoringDuration"])
 
     def item_rates(key: str):
-        return [
-            (item, recipe_rate * amount)
-            for (item, amount) in find_item_amounts(entry[key])
-        ]
+        return [(item, recipe_rate * amount) for (item, amount) in find_item_amounts(entry[key])]
 
     vpc_constant = float(entry["mVariablePowerConsumptionConstant"])
     vpc_factor = float(entry["mVariablePowerConsumptionFactor"])
@@ -810,9 +786,7 @@ for native_class in ALL_GENERATOR_NATIVE_CLASSES:
         generators[generator.class_name] = generator
 
 # geothermal generator (special case)
-geothermal_generator = parse_geothermal_generator(
-    class_name_to_entry[GEOTHERMAL_GENERATOR_CLASS]
-)
+geothermal_generator = parse_geothermal_generator(class_name_to_entry[GEOTHERMAL_GENERATOR_CLASS])
 
 debug_dump("Parsed generators", generators)
 debug_dump("Parsed geothermal generator", geothermal_generator)
@@ -852,9 +826,7 @@ geysers: dict[str, Resource] = {}
 
 # Persistent_Level:PersistentLevel.BP_FrackingCore6_UAID_40B076DF2F79D3DF01_1961476789
 # becomes #6. We can strip out the UAID as long as it's unique for each item type.
-FRACKING_CORE_REGEX = re.compile(
-    r"Persistent_Level:PersistentLevel\.BP_FrackingCore_?(\d+)(_UAID_\w+)?"
-)
+FRACKING_CORE_REGEX = re.compile(r"Persistent_Level:PersistentLevel\.BP_FrackingCore_?(\d+)(_UAID_\w+)?")
 
 
 def parse_fracking_core_name(s: str) -> str:
@@ -945,9 +917,7 @@ debug_dump("Parsed geysers", geysers)
 ### Somersloops ###
 
 
-def find_somersloops_map_layer(
-    map_tab_artifacts: list[dict[str, list[dict[str, Any]]]]
-):
+def find_somersloops_map_layer(map_tab_artifacts: list[dict[str, list[dict[str, Any]]]]):
     for unknown_level in map_tab_artifacts:
         for map_layer in unknown_level["options"]:
             if map_layer["layerId"] == "somersloops":
@@ -972,50 +942,30 @@ def get_num_somersloops_available() -> int:
     if args.num_somersloops_available is not None:
         return args.num_somersloops_available
 
-    num_somersloops_on_map = parse_num_somersloops_on_map(
-        find_somersloops_map_layer(map_info["artifacts"])
-    )
+    num_somersloops_on_map = parse_num_somersloops_on_map(find_somersloops_map_layer(map_info["artifacts"]))
     research_somersloop_cost = (
-        PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST
-        if not args.disable_production_amplification
-        else 0
-    ) + (
-        ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST
-        if args.num_alien_power_augmenters > 0
-        else 0
-    )
+        PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST if not args.disable_production_amplification else 0
+    ) + (ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST if args.num_alien_power_augmenters > 0 else 0)
     assert research_somersloop_cost <= num_somersloops_on_map
     return num_somersloops_on_map - research_somersloop_cost
 
 
 NUM_SOMERSLOOPS_AVAILABLE = get_num_somersloops_available()
-POWER_SOMERSLOOP_COST: int = (
-    ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST * args.num_alien_power_augmenters
-)
+POWER_SOMERSLOOP_COST: int = ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST * args.num_alien_power_augmenters
 
-assert (
-    POWER_SOMERSLOOP_COST <= NUM_SOMERSLOOPS_AVAILABLE
-), f"{POWER_SOMERSLOOP_COST=} {NUM_SOMERSLOOPS_AVAILABLE=}"
+assert POWER_SOMERSLOOP_COST <= NUM_SOMERSLOOPS_AVAILABLE, f"{POWER_SOMERSLOOP_COST=} {NUM_SOMERSLOOPS_AVAILABLE=}"
 
-NUM_SOMERSLOOPS_AVAILABLE_FOR_PRODUCTION = (
-    NUM_SOMERSLOOPS_AVAILABLE - POWER_SOMERSLOOP_COST
-)
+NUM_SOMERSLOOPS_AVAILABLE_FOR_PRODUCTION = NUM_SOMERSLOOPS_AVAILABLE - POWER_SOMERSLOOP_COST
 
 assert args.num_fueled_alien_power_augmenters <= args.num_alien_power_augmenters
 
-ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER: float = (
-    ALIEN_POWER_AUGMENTER_STATIC_POWER * args.num_alien_power_augmenters
-)
+ALIEN_POWER_AUGMENTER_TOTAL_STATIC_POWER: float = ALIEN_POWER_AUGMENTER_STATIC_POWER * args.num_alien_power_augmenters
 ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST: float = (
     ALIEN_POWER_AUGMENTER_BASE_CIRCUIT_BOOST
     * (args.num_alien_power_augmenters - args.num_fueled_alien_power_augmenters)
-) + (
-    ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST * args.num_fueled_alien_power_augmenters
-)
+) + (ALIEN_POWER_AUGMENTER_FUELED_CIRCUIT_BOOST * args.num_fueled_alien_power_augmenters)
 POWER_PRODUCTION_MULTIPLIER = 1.0 + ALIEN_POWER_AUGMENTER_TOTAL_CIRCUIT_BOOST
-TOTAL_ALIEN_POWER_MATRIX_COST: float = (
-    ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE * args.num_fueled_alien_power_augmenters
-)
+TOTAL_ALIEN_POWER_MATRIX_COST: float = ALIEN_POWER_AUGMENTER_FUEL_INPUT_RATE * args.num_fueled_alien_power_augmenters
 
 debug_dump(
     "Somersloops",
@@ -1036,9 +986,7 @@ debug_dump(
 ### Additional helpers ###
 
 
-def get_power_consumption(
-    machine: PowerConsumer, clock: Fraction, recipe: Recipe | None = None
-) -> float:
+def get_power_consumption(machine: PowerConsumer, clock: Fraction, recipe: Recipe | None = None) -> float:
     power_consumption = machine.power_consumption
     if recipe is not None and machine.is_variable_power:
         power_consumption += recipe.mean_variable_power_consumption
@@ -1054,9 +1002,8 @@ def get_miner_for_resource(resource: Resource) -> Miner:
     item = items[item_class]
     candidates: list[Miner] = []
     for miner in miners.values():
-        if (
-            miner.uses_resource_wells == resource.is_resource_well
-            and miner.check_allowed_resource(item_class, item.form)
+        if miner.uses_resource_wells == resource.is_resource_well and miner.check_allowed_resource(
+            item_class, item.form
         ):
             candidates.append(miner)
     assert candidates, f"could not find miner for {item_class}"
@@ -1078,9 +1025,7 @@ def get_conveyance_limit_clock(item: Item, rate: float) -> Fraction:
     return float_to_clock(conveyance_limit / rate)
 
 
-def get_max_extraction_clock(
-    miner: Miner, resource: Resource, extraction_rate: float
-) -> Fraction:
+def get_max_extraction_clock(miner: Miner, resource: Resource, extraction_rate: float) -> Fraction:
     max_clock = miner.max_clock
 
     # Assume individual Resource Well Extractors can never exceed conveyance limit
@@ -1091,9 +1036,7 @@ def get_max_extraction_clock(
     return min(max_clock, get_conveyance_limit_clock(item, extraction_rate))
 
 
-def get_max_recipe_clock(
-    machine: Machine, recipe: Recipe, output_multiplier: float = 1.0
-) -> Fraction:
+def get_max_recipe_clock(machine: Machine, recipe: Recipe, output_multiplier: float = 1.0) -> Fraction:
     max_clock = machine.max_clock
 
     for item_class, input_rate in recipe.inputs:
@@ -1105,21 +1048,15 @@ def get_max_recipe_clock(
     for item_class, output_rate in recipe.outputs:
         max_clock = min(
             max_clock,
-            get_conveyance_limit_clock(
-                items[item_class], output_rate * output_multiplier
-            ),
+            get_conveyance_limit_clock(items[item_class], output_rate * output_multiplier),
         )
 
     return max_clock
 
 
-def clamp_clock_choices(
-    configured_clocks: list[Fraction], min_clock: Fraction, max_clock: Fraction
-) -> list[Fraction]:
+def clamp_clock_choices(configured_clocks: list[Fraction], min_clock: Fraction, max_clock: Fraction) -> list[Fraction]:
     assert min_clock < max_clock
-    return sorted(
-        {min(max_clock, max(min_clock, clock)) for clock in configured_clocks}
-    )
+    return sorted({min(max_clock, max(min_clock, clock)) for clock in configured_clocks})
 
 
 # It's convenient to consider generators burning fuel as recipes,
@@ -1138,9 +1075,7 @@ def create_recipe_for_generator(generator: PowerGenerator, fuel: Fuel) -> Recipe
     if generator.requires_supplemental:
         assert fuel.supplemental_resource_class is not None
         supplemental_class = fuel.supplemental_resource_class
-        supplemental_rate = (
-            60.0 * power_production * generator.supplemental_to_power_ratio
-        )
+        supplemental_rate = 60.0 * power_production * generator.supplemental_to_power_ratio
         inputs.append((supplemental_class, supplemental_rate))
 
     if fuel.byproduct is not None:
@@ -1263,9 +1198,7 @@ def add_lp_column(
     )
 
 
-def get_recipe_coeffs(
-    recipe: Recipe, clock: Fraction, output_multiplier: float = 1.0
-) -> defaultdict[str, float]:
+def get_recipe_coeffs(recipe: Recipe, clock: Fraction, output_multiplier: float = 1.0) -> defaultdict[str, float]:
     coeffs: defaultdict[str, float] = defaultdict(float)
 
     for item_class, input_rate in recipe.inputs:
@@ -1341,30 +1274,19 @@ def add_manufacturer_columns(recipe: Recipe):
             power_multiplier = 1.0
             requires_integrality = False
         else:
-            output_multiplier = (
-                1.0 + somersloops * manufacturer.production_shard_boost_multiplier
-            )
-            power_multiplier = (
-                output_multiplier
-                ** manufacturer.production_boost_power_consumption_exponent
-            )
+            output_multiplier = 1.0 + somersloops * manufacturer.production_shard_boost_multiplier
+            power_multiplier = output_multiplier**manufacturer.production_boost_power_consumption_exponent
             # Fractional machines are generally fine due to clock speeds,
             # but we should not allow fractional somersloops.
             requires_integrality = True
 
         min_clock = manufacturer.min_clock
-        max_clock = get_max_recipe_clock(
-            manufacturer, recipe, output_multiplier=output_multiplier
-        )
-        configured_clocks = (
-            MANUFACTURER_CLOCKS if somersloops is None else SOMERSLOOP_CLOCKS
-        )
+        max_clock = get_max_recipe_clock(manufacturer, recipe, output_multiplier=output_multiplier)
+        configured_clocks = MANUFACTURER_CLOCKS if somersloops is None else SOMERSLOOP_CLOCKS
         clock_choices = clamp_clock_choices(configured_clocks, min_clock, max_clock)
 
         for clock in clock_choices:
-            power_consumption = (
-                get_power_consumption(manufacturer, clock, recipe) * power_multiplier
-            )
+            power_consumption = get_power_consumption(manufacturer, clock, recipe) * power_multiplier
             coeffs = {
                 "machines": 1,
                 "power_consumption": power_consumption,
@@ -1372,9 +1294,7 @@ def add_manufacturer_columns(recipe: Recipe):
             if somersloops is not None:
                 coeffs["somersloop_usage"] = somersloops
 
-            recipe_coeffs = get_recipe_coeffs(
-                recipe, clock=clock, output_multiplier=output_multiplier
-            )
+            recipe_coeffs = get_recipe_coeffs(recipe, clock=clock, output_multiplier=output_multiplier)
             for item_var, coeff in recipe_coeffs.items():
                 coeffs[item_var] = coeff
                 lp_equalities[item_var] = 0.0
@@ -1441,9 +1361,7 @@ def add_generator_columns(generator: PowerGenerator, fuel: Fuel):
     clock_choices = clamp_clock_choices(GENERATOR_CLOCKS, min_clock, max_clock)
 
     for clock in clock_choices:
-        power_production = (
-            get_power_production(generator, clock=clock) * POWER_PRODUCTION_MULTIPLIER
-        )
+        power_production = get_power_production(generator, clock=clock) * POWER_PRODUCTION_MULTIPLIER
         coeffs = {
             "machines": 1,
             "power_production": power_production,
@@ -1474,9 +1392,7 @@ def add_geothermal_generator_columns(resource: Resource):
     resource_var = f"resource|{resource_id}"
 
     power_production = (
-        geothermal_generator.mean_variable_power_production
-        * resource.multiplier
-        * POWER_PRODUCTION_MULTIPLIER
+        geothermal_generator.mean_variable_power_production * resource.multiplier * POWER_PRODUCTION_MULTIPLIER
     )
     coeffs = {
         "machines": 1,
@@ -1551,9 +1467,7 @@ machine_limit = (
 )
 
 
-def add_objective_column(
-    objective: str, objective_weight: float, hard_limit: HardLimit | None = None
-):
+def add_objective_column(objective: str, objective_weight: float, hard_limit: HardLimit | None = None):
     coeffs = {
         objective: -1.0,
     }
@@ -1690,9 +1604,7 @@ while True:
     if not any_added:
         break
 
-unreachable_items = (
-    set(v for v in lp_variables if v.startswith("item|")) - reachable_items
-)
+unreachable_items = set(v for v in lp_variables if v.startswith("item|")) - reachable_items
 
 debug_dump("Unreachable items to be pruned", unreachable_items)
 
@@ -1748,9 +1660,7 @@ column_type_order = to_index_map(
     ]
 )
 resource_subtype_order = to_index_map(["pure", "normal", "impure"])
-objective_order = to_index_map(
-    ["points", "machines", "machine_limit", "conveyors", "pipelines"]
-)
+objective_order = to_index_map(["points", "machines", "machine_limit", "conveyors", "pipelines"])
 extra_cost_order = to_index_map(["transport_power_cost", "drone_battery_cost"])
 
 
@@ -1829,8 +1739,7 @@ pprint(lp_result)
 REPORT_EPSILON = 1e-7
 
 column_results: list[tuple[str, LPColumn, float]] = [
-    (column_id, column, lp_result.x[column_index])
-    for column_index, (column_id, column) in enumerate(sorted_columns)
+    (column_id, column, lp_result.x[column_index]) for column_index, (column_id, column) in enumerate(sorted_columns)
 ]
 
 if not args.show_unused:
@@ -1891,9 +1800,7 @@ def create_empty_variable_breakdown(variable: str) -> VariableBreakdown:
     )
 
 
-variable_breakdowns = {
-    variable: create_empty_variable_breakdown(variable) for variable in lp_variables
-}
+variable_breakdowns = {variable: create_empty_variable_breakdown(variable) for variable in lp_variables}
 
 lp_objective: float = -lp_result.fun
 
@@ -1960,9 +1867,7 @@ for variable, breakdown in variable_breakdowns.items():
     finalize_variable_budget_side(breakdown.production)
     finalize_variable_budget_side(breakdown.consumption)
 
-sorted_variable_breakdowns = sorted(
-    variable_breakdowns.values(), key=lambda bd: bd.sort_key
-)
+sorted_variable_breakdowns = sorted(variable_breakdowns.values(), key=lambda bd: bd.sort_key)
 
 if args.xlsx_report:
     print("Writing xlsx report")
@@ -1974,15 +1879,9 @@ if args.xlsx_report:
     default_format = workbook.add_format({"align": "center"})
     top_format = workbook.add_format({"align": "center", "top": True})
     bold_format = workbook.add_format({"align": "center", "bold": True})
-    bold_underline_format = workbook.add_format(
-        {"align": "center", "bold": True, "underline": True}
-    )
-    bold_top_format = workbook.add_format(
-        {"align": "center", "bold": True, "top": True}
-    )
-    bold_underline_top_format = workbook.add_format(
-        {"align": "center", "bold": True, "underline": True, "top": True}
-    )
+    bold_underline_format = workbook.add_format({"align": "center", "bold": True, "underline": True})
+    bold_top_format = workbook.add_format({"align": "center", "bold": True, "top": True})
+    bold_underline_top_format = workbook.add_format({"align": "center", "bold": True, "underline": True, "top": True})
     percent_format = workbook.add_format({"align": "center", "num_format": "0.0#####%"})
 
     sheet_breakdown = workbook.add_worksheet("Breakdown" + args.xlsx_sheet_suffix)
@@ -2067,22 +1966,14 @@ if args.xlsx_report:
                     fmts = (bold_format, percent_format)
                 else:
                     fmts = (bold_format, default_format)
-                write_cell(
-                    sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0]
-                )
+                write_cell(sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0])
                 write_cell(sheet_breakdown, current_row, 1, name, fmt=fmts[0])
                 for i, entry in enumerate(budget_side):
                     value = getattr(entry, key)
                     write_cell(sheet_breakdown, current_row, 2 + i, value, fmt=fmts[1])
                 if key == "share":
-                    cf = (
-                        production_share_cf
-                        if budget_side_name == "production"
-                        else consumption_share_cf
-                    )
-                    sheet_breakdown.conditional_format(
-                        current_row, 3, current_row, len(budget_side) + 1, cf
-                    )
+                    cf = production_share_cf if budget_side_name == "production" else consumption_share_cf
+                    sheet_breakdown.conditional_format(current_row, 3, current_row, len(budget_side) + 1, cf)
                 max_budget_entries = max(max_budget_entries, len(budget_side))
                 current_row += 1
 
@@ -2096,9 +1987,7 @@ if args.xlsx_report:
                 fmts = (bold_top_format, top_format)
             else:
                 fmts = (bold_format, default_format)
-            write_cell(
-                sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0]
-            )
+            write_cell(sheet_breakdown, current_row, 0, breakdown.display_name, fmt=fmts[0])
             write_cell(
                 sheet_breakdown,
                 current_row,
@@ -2106,9 +1995,7 @@ if args.xlsx_report:
                 initial_or_final.capitalize(),
                 fmt=fmts[0],
             )
-            write_cell(
-                sheet_breakdown, current_row, 2, initial_or_final_value, fmt=fmts[1]
-            )
+            write_cell(sheet_breakdown, current_row, 2, initial_or_final_value, fmt=fmts[1])
             current_row += 1
 
     for c, width in enumerate([41, 19, 13] + [59] * (max_budget_entries - 1)):
