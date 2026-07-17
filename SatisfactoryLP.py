@@ -17,7 +17,12 @@ from typing import Any, Iterable, TypeVar, cast
 T = TypeVar("T")
 
 
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    description="Clock specs are comma-separated entries of the form VALUE, LO-HI/STEP (linear), "
+    "or LO-HI/xRATIO (geometric, e.g. 0.01-2.5/x1.01; HI is always included). "
+    "All clocks are rounded to the in-game granularity of 0.0001%.",
+)
 parser.add_argument(
     "--machine-penalty",
     type=float,
@@ -110,6 +115,12 @@ parser.add_argument(
     type=str,
     default="",
     help="comma-separated list of recipe_class to disable",
+)
+parser.add_argument(
+    "--power-consumption-multiplier",
+    type=float,
+    default=1.0,
+    help="Power Consumption Multiplier game option (scales all power consumption)",
 )
 parser.add_argument(
     "--infinite-power",
@@ -287,15 +298,29 @@ def parse_clock_spec(s: str) -> list[Fraction]:
             lower_str, _, upper_str = bounds.rpartition("-")
             lower = str_to_clock(lower_str)
             upper = str_to_clock(upper_str)
-            step = str_to_clock(step_str)
-            current = lower
-            while current <= upper:
-                result.append(current)
-                current += step
+            if step_str.startswith("x"):
+                ratio = float(step_str[1:])
+                assert lower > 0, f"geometric clock spec requires positive lower bound: {token}"
+                assert ratio > 1.0, f"geometric clock spec requires ratio > 1: {token}"
+                # Generate from ratio powers rather than compounding already-rounded
+                # values, so grid rounding does not accumulate (or stall the loop).
+                k = 0
+                while True:
+                    current = float_to_clock(float(lower) * ratio**k)
+                    if current >= upper:
+                        break
+                    result.append(current)
+                    k += 1
+                result.append(upper)
+            else:
+                step = str_to_clock(step_str)
+                current = lower
+                while current <= upper:
+                    result.append(current)
+                    current += step
         else:
             result.append(str_to_clock(token))
-    result.sort()
-    return result
+    return sorted(set(result))
 
 
 MINER_CLOCKS = parse_clock_spec(args.miner_clocks)
@@ -990,7 +1015,7 @@ def get_power_consumption(machine: PowerConsumer, clock: Fraction, recipe: Recip
     power_consumption = machine.power_consumption
     if recipe is not None and machine.is_variable_power:
         power_consumption += recipe.mean_variable_power_consumption
-    return power_consumption * (float(clock) ** machine.power_consumption_exponent)
+    return power_consumption * (float(clock) ** machine.power_consumption_exponent) * args.power_consumption_multiplier
 
 
 def get_power_production(generator: PowerGenerator, clock: Fraction) -> float:
@@ -1333,7 +1358,7 @@ def add_sink_column(item: Item):
 
     coeffs = {
         "machines": 1 / CONVEYOR_BELT_LIMIT,
-        "power_consumption": SINK_POWER_CONSUMPTION / CONVEYOR_BELT_LIMIT,
+        "power_consumption": SINK_POWER_CONSUMPTION * args.power_consumption_multiplier / CONVEYOR_BELT_LIMIT,
         item_var: -1,
         "points": points,
     }
