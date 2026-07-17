@@ -1761,7 +1761,7 @@ pprint(lp_result)
 ### Display formatting ###
 
 
-REPORT_EPSILON = 1e-7
+REPORT_EPSILON = 1e-6
 
 column_results: list[tuple[str, LPColumn, float]] = [
     (column_id, column, lp_result.x[column_index]) for column_index, (column_id, column) in enumerate(sorted_columns)
