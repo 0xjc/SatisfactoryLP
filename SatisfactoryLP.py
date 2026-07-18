@@ -967,6 +967,7 @@ def parse_num_somersloops_on_map(somersloops_map_layer: dict[str, Any]) -> int:
 
 PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST = 1
 ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST = 1
+ALIEN_POWER_MATRIX_UNLOCK_SOMERSLOOP_COST = 1
 ALIEN_POWER_AUGMENTER_BUILD_SOMERSLOOP_COST = 10
 
 
@@ -976,8 +977,10 @@ def get_num_somersloops_available() -> int:
 
     num_somersloops_on_map = parse_num_somersloops_on_map(find_somersloops_map_layer(map_info["artifacts"]))
     research_somersloop_cost = (
-        PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST if not args.disable_production_amplification else 0
-    ) + (ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST if args.num_alien_power_augmenters > 0 else 0)
+        (PRODUCTION_AMPLIFIER_UNLOCK_SOMERSLOOP_COST if not args.disable_production_amplification else 0)
+        + (ALIEN_POWER_AUGMENTER_UNLOCK_SOMERSLOOP_COST if args.num_alien_power_augmenters > 0 else 0)
+        + (ALIEN_POWER_MATRIX_UNLOCK_SOMERSLOOP_COST if args.num_fueled_alien_power_augmenters > 0 else 0)
+    )
     assert research_somersloop_cost <= num_somersloops_on_map
     return num_somersloops_on_map - research_somersloop_cost
 
