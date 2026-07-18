@@ -24,6 +24,13 @@ parser = argparse.ArgumentParser(
     "All clocks are rounded to the in-game granularity of 0.0001%.",
 )
 parser.add_argument(
+    "--objective",
+    type=str,
+    choices=["points", "gross_power"],
+    default="points",
+    help="quantity to maximize",
+)
+parser.add_argument(
     "--machine-penalty",
     type=float,
     default=1000.0,
@@ -1391,6 +1398,8 @@ def add_generator_columns(generator: PowerGenerator, fuel: Fuel):
             "machines": 1,
             "power_production": power_production,
         }
+        if args.objective == "gross_power":
+            coeffs["gross_power"] = power_production
 
         recipe_coeffs = get_recipe_coeffs(recipe, clock=clock)
         for item_var, coeff in recipe_coeffs.items():
@@ -1424,6 +1433,8 @@ def add_geothermal_generator_columns(resource: Resource):
         "power_production": power_production,
         resource_var: -1,
     }
+    if args.objective == "gross_power":
+        coeffs["gross_power"] = power_production
 
     add_lp_column(
         coeffs,
@@ -1508,7 +1519,9 @@ def add_objective_column(objective: str, objective_weight: float, hard_limit: Ha
     lp_equalities[objective] = 0.0
 
 
-add_objective_column("points", 1.0)
+add_objective_column("points", 1.0 if args.objective == "points" else 0.0)
+if args.objective == "gross_power":
+    add_objective_column("gross_power", 1.0)
 add_objective_column("machines", -args.machine_penalty, machine_limit)
 add_objective_column("conveyors", -args.conveyor_penalty)
 add_objective_column("pipelines", -args.pipeline_penalty)
@@ -1685,7 +1698,7 @@ column_type_order = to_index_map(
     ]
 )
 resource_subtype_order = to_index_map(["pure", "normal", "impure"])
-objective_order = to_index_map(["points", "machines", "machine_limit", "conveyors", "pipelines"])
+objective_order = to_index_map(["points", "gross_power", "machines", "machine_limit", "conveyors", "pipelines"])
 extra_cost_order = to_index_map(["transport_power_cost", "drone_battery_cost"])
 
 
